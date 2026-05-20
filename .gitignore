@@ -1,0 +1,28 @@
+# Binaries
+bin/
+*.exe
+
+# Go build cache
+/proxy
+/log-server
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs (runtime output)
+logs/
+*.jsonl
+
+# Sisyphus internal state
+.sisyphus/
+
+# Environment files with secrets
+.env
