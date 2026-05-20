@@ -172,42 +172,6 @@ func TestResponsesPOSTReachesUpstreamWithAuthorizationHeader(t *testing.T) {
 	}
 }
 
-func TestUnsupportedRouteReturns404(t *testing.T) {
-	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
-		ResponseType: "json",
-		StatusCode:   200,
-	})
-	defer fUpstream.Server.Close()
-
-	fLogServer := testutil.NewFakeLogServer()
-	defer fLogServer.Server.Close()
-
-	mockEnqueuer := &mockLogEnqueuer{}
-
-	cfg := config.ProxyConfig{
-		ListenAddr:      ":0",
-		UpstreamBaseURL: fUpstream.Server.URL,
-		LogServerURL:    fLogServer.URL(),
-		LogServerToken:  "test-token",
-		LogQueueSize:    1024,
-		CaptureMaxBytes: 0,
-	}
-
-	handler := proxy.NewHandler(cfg, mockEnqueuer)
-
-	req, _ := http.NewRequest("GET", "/v1/models", nil)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != 404 {
-		t.Errorf("expected status 404, got %d", rr.Code)
-	}
-
-	if len(fUpstream.Requests) != 0 {
-		t.Errorf("expected 0 upstream requests for unsupported route, got %d", len(fUpstream.Requests))
-	}
-}
-
 func TestResponseStatusBodyHeadersReturnedToClient(t *testing.T) {
 	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
 		ResponseType: "json",
@@ -655,5 +619,169 @@ func TestNonStreamingRequestsRemainNonStreaming(t *testing.T) {
 	}
 	if !strings.Contains(string(record.ResponseBody), "non-stream") {
 		t.Fatalf("expected original JSON response body, got %s", string(record.ResponseBody))
+	}
+}
+
+func TestAllPathsProxied(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody:  map[string]interface{}{"id": "any-path"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	handler := proxy.NewHandler(config.ProxyConfig{UpstreamBaseURL: fUpstream.Server.URL}, mockEnqueuer)
+
+	req, _ := http.NewRequest("POST", "/v1/models", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != 200 {
+		t.Errorf("expected status 200 for unknown path, got %d", rr.Code)
+	}
+	if len(fUpstream.Requests) != 1 {
+		t.Errorf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	if fUpstream.Requests[0].Path != "/v1/models" {
+		t.Errorf("expected path /v1/models, got %s", fUpstream.Requests[0].Path)
+	}
+}
+
+func TestXFFHeaderFromDirectClient(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	handler := proxy.NewHandler(config.ProxyConfig{UpstreamBaseURL: fUpstream.Server.URL}, mockEnqueuer)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	if xff == "" {
+		t.Error("expected X-Forwarded-For header to be set")
+	}
+}
+
+func TestXFFHeaderFromLocalhost(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	fLogServer := testutil.NewFakeLogServer()
+	defer fLogServer.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	handler := proxy.NewHandler(config.ProxyConfig{UpstreamBaseURL: fUpstream.Server.URL, LogServerURL: fLogServer.URL(), LogServerToken: "test"}, mockEnqueuer)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50, 10.0.0.1")
+	req.Host = "localhost"
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	if !strings.Contains(xff, "203.0.113.50") {
+		t.Errorf("expected X-Forwarded-For to contain original value '203.0.113.50', got %s", xff)
+	}
+}
+
+func TestXFFHeaderFromLocalhostNoExisting(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	handler := proxy.NewHandler(config.ProxyConfig{UpstreamBaseURL: fUpstream.Server.URL}, mockEnqueuer)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	if xff == "" {
+		t.Error("expected X-Forwarded-For header to be set")
+	}
+}
+
+func TestXForwardedHostAndProto(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	handler := proxy.NewHandler(config.ProxyConfig{UpstreamBaseURL: fUpstream.Server.URL}, mockEnqueuer)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xfh := fUpstream.Requests[0].Header.Get("X-Forwarded-Host")
+	if xfh == "" {
+		t.Error("expected X-Forwarded-Host header to be set")
+	}
+	xfp := fUpstream.Requests[0].Header.Get("X-Forwarded-Proto")
+	if xfp == "" {
+		t.Error("expected X-Forwarded-Proto header to be set")
 	}
 }

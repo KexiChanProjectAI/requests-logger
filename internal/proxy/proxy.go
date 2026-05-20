@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -33,17 +34,7 @@ func NewHandler(cfg config.ProxyConfig, logEnqueuer LogEnqueuer) http.Handler {
 	}
 }
 
-var allowedRoutes = map[string]bool{
-	"/v1/responses":        true,
-	"/v1/chat/completions": true,
-}
-
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !allowedRoutes[r.URL.Path] {
-		http.Error(w, "Not Found", http.StatusNotFound)
-		return
-	}
-
 	startTime := time.Now()
 
 	reqBody, err := io.ReadAll(r.Body)
@@ -74,6 +65,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			upstreamReq.Header.Add(k, v)
 		}
 	}
+
+	setForwardingHeaders(upstreamReq, r)
 
 	client := &http.Client{}
 	resp, err := client.Do(upstreamReq)
@@ -330,4 +323,41 @@ func (h *Handler) applyCaptureMax(record *logschema.Record) {
 		}
 		record.TruncationInfo.Truncated = true
 	}
+}
+
+func isLocalhost(ip string) bool {
+	if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
+		return true
+	}
+	if parsedIP := net.ParseIP(ip); parsedIP != nil {
+		return parsedIP.IsLoopback()
+	}
+	return false
+}
+
+func setForwardingHeaders(outreq *http.Request, r *http.Request) {
+	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		clientIP = r.RemoteAddr
+	}
+
+	if isLocalhost(clientIP) {
+		if existingXFF := r.Header.Get("X-Forwarded-For"); existingXFF != "" {
+			outreq.Header.Set("X-Forwarded-For", existingXFF+", "+clientIP)
+		} else {
+			outreq.Header.Set("X-Forwarded-For", clientIP)
+		}
+	} else {
+		outreq.Header.Set("X-Forwarded-For", clientIP)
+	}
+
+	outreq.Header.Set("X-Forwarded-Host", r.Host)
+
+	proto := "http"
+	if r.TLS != nil {
+		proto = "https"
+	} else if r.URL.Scheme == "https" {
+		proto = "https"
+	}
+	outreq.Header.Set("X-Forwarded-Proto", proto)
 }
