@@ -26,3 +26,6 @@ logs/
 
 # Environment files with secrets
 .env
+
+# Data example files (too large for git)
+data.example.json

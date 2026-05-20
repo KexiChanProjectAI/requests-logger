@@ -262,3 +262,76 @@ func TestRecordBodyRawMessage(t *testing.T) {
 		t.Error("RequestBody should preserve content after JSON round-trip")
 	}
 }
+
+func TestSanitizeRawMessages(t *testing.T) {
+	record := &Record{
+		LogID: "test-sanitize",
+	}
+
+	record.RequestBody = nil
+	record.ResponseBody = nil
+	record.SanitizeRawMessages()
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("json.Marshal after SanitizeRawMessages failed: %v", err)
+	}
+
+	var unmarshaled Record
+	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if string(unmarshaled.RequestBody) != "null" {
+		t.Errorf("RequestBody should be null, got %q", string(unmarshaled.RequestBody))
+	}
+	if string(unmarshaled.ResponseBody) != "null" {
+		t.Errorf("ResponseBody should be null, got %q", string(unmarshaled.ResponseBody))
+	}
+}
+
+func TestSanitizeRawMessagesPreservesValidJSON(t *testing.T) {
+	record := &Record{
+		LogID:       "test-sanitize-valid",
+		RequestBody: json.RawMessage(`{"model":"gpt-4"}`),
+	}
+
+	record.SanitizeRawMessages()
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+
+	var unmarshaled Record
+	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if string(unmarshaled.RequestBody) != `{"model":"gpt-4"}` {
+		t.Errorf("RequestBody should be preserved, got %q", string(unmarshaled.RequestBody))
+	}
+}
+
+func TestSanitizeRawMessagesHandlesInvalidJSON(t *testing.T) {
+	record := &Record{
+		LogID:       "test-sanitize-invalid",
+		RequestBody: json.RawMessage(`{invalid`),
+	}
+
+	record.SanitizeRawMessages()
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("json.Marshal should not fail for invalid RawMessage: %v", err)
+	}
+
+	var unmarshaled Record
+	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if string(unmarshaled.RequestBody) != "null" {
+		t.Errorf("RequestBody with invalid JSON should become null, got %q", string(unmarshaled.RequestBody))
+	}
+}

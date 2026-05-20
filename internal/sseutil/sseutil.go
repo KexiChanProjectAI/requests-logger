@@ -78,21 +78,48 @@ func HasDone(sse []byte) bool {
 // AssembleFinalState reassembles streaming SSE data into the final complete response object.
 // For the Responses API: extracts the response from the response.completed event.
 // For Chat Completions: merges all delta.content into a single response object.
+// Always returns valid JSON - returns null for empty/invalid input.
 func AssembleFinalState(sseData []byte) json.RawMessage {
-	events, err := parseSSEEvents(sseData)
-	if err != nil || len(events) == 0 {
-		return json.RawMessage(`{}`)
+	defer func() {
+		if r := recover(); r != nil {
+			// Recover from any panics during assembly
+		}
+	}()
+
+	// Handle empty input
+	if len(sseData) == 0 {
+		return json.RawMessage(`null`)
 	}
+
+	events, err := parseSSEEvents(sseData)
+	if err != nil && len(events) == 0 {
+		return json.RawMessage(`null`)
+	}
+	if len(events) == 0 {
+		return json.RawMessage(`null`)
+	}
+
+	var result json.RawMessage
 
 	// Check if this is a Responses API stream (has event types)
 	for _, ev := range events {
 		if ev.Type == "response.completed" {
-			return extractResponsesAPIFinalState(ev.Data)
+			result = extractResponsesAPIFinalState(ev.Data)
+			break
 		}
 	}
 
-	// Check if this is a Chat Completions stream (has chat.completion.chunk objects)
-	return assembleChatCompletionsFromEvents(events)
+	// If no response.completed found, try chat completions assembly
+	if result == nil || len(result) == 0 {
+		result = assembleChatCompletionsFromEvents(events)
+	}
+
+	// Validate the result - if invalid, return null
+	if len(result) == 0 || !json.Valid(result) {
+		return json.RawMessage(`null`)
+	}
+
+	return result
 }
 
 // parseSSEEvents parses SSE data and returns events with their Type preserved.
@@ -113,21 +140,31 @@ func parseSSEEvents(sseData []byte) ([]sse.Event, error) {
 
 // extractResponsesAPIFinalState extracts the response object from a response.completed event.
 // The data payload looks like: {"type":"response.completed","response":{...full response...}}
+// Returns null on any error to ensure valid JSON output.
 func extractResponsesAPIFinalState(data string) json.RawMessage {
+	if data == "" {
+		return json.RawMessage(`null`)
+	}
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &payload); err != nil {
-		return json.RawMessage(`{}`)
+		return json.RawMessage(`null`)
 	}
 	if resp, ok := payload["response"]; ok {
-		result, _ := json.Marshal(resp)
+		result, err := json.Marshal(resp)
+		if err != nil {
+			return json.RawMessage(`null`)
+		}
 		return json.RawMessage(result)
 	}
-	// Fallback: return the whole payload
-	result, _ := json.Marshal(payload)
+	result, err := json.Marshal(payload)
+	if err != nil {
+		return json.RawMessage(`null`)
+	}
 	return json.RawMessage(result)
 }
 
 // assembleChatCompletionsFromEvents merges chat completion chunks into a single response.
+// Returns null on error to ensure valid JSON output.
 func assembleChatCompletionsFromEvents(events []sse.Event) json.RawMessage {
 	// Collect all JSON data payloads (skip [DONE])
 	var chunks []map[string]interface{}
@@ -143,7 +180,7 @@ func assembleChatCompletionsFromEvents(events []sse.Event) json.RawMessage {
 	}
 
 	if len(chunks) == 0 {
-		return json.RawMessage(`{}`)
+		return json.RawMessage(`null`)
 	}
 
 	// Check if this is actually a chat completions stream
@@ -157,7 +194,10 @@ func assembleChatCompletionsFromEvents(events []sse.Event) json.RawMessage {
 
 	if !isChatChunk {
 		// Unknown format — return last event as final state
-		last, _ := json.Marshal(chunks[len(chunks)-1])
+		last, err := json.Marshal(chunks[len(chunks)-1])
+		if err != nil {
+			return json.RawMessage(`null`)
+		}
 		return json.RawMessage(last)
 	}
 
@@ -238,7 +278,10 @@ func assembleChatCompletionsFromEvents(events []sse.Event) json.RawMessage {
 		}
 	}
 
-	jsonBytes, _ := json.Marshal(result)
+	jsonBytes, err := json.Marshal(result)
+	if err != nil {
+		return json.RawMessage(`null`)
+	}
 	return json.RawMessage(jsonBytes)
 }
 

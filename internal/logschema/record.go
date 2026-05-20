@@ -67,3 +67,21 @@ func (r *Record) SetResponseHeaders(h map[string][]string) {
 		r.ResponseHeaders[k] = v
 	}
 }
+
+// SanitizeRawMessages ensures all json.RawMessage fields contain valid JSON.
+// If any field contains invalid JSON (nil, empty, or malformed), it is replaced with null.
+// This must be called before json.Marshal to prevent "unexpected end of JSON input" errors.
+func (r *Record) SanitizeRawMessages() {
+	r.RequestBody = sanitizeRawMessage(r.RequestBody)
+	r.ResponseBody = sanitizeRawMessage(r.ResponseBody)
+}
+
+func sanitizeRawMessage(msg json.RawMessage) json.RawMessage {
+	if msg == nil || len(msg) == 0 {
+		return json.RawMessage(`null`)
+	}
+	if !json.Valid(msg) {
+		return json.RawMessage(`null`)
+	}
+	return msg
+}

@@ -121,6 +121,9 @@ func (c *Client) sendWithRetry(record *logschema.Record) {
 }
 
 func (c *Client) send(record *logschema.Record) error {
+	// Ensure all RawMessage fields contain valid JSON before marshaling
+	record.SanitizeRawMessages()
+
 	data, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("marshal error: %w", err)

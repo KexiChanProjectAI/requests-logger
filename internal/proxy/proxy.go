@@ -134,14 +134,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // sanitizeResponseBody ensures response body is stored as valid JSON.
 // If the body is valid JSON, it returns it as-is wrapped in json.RawMessage.
 // If not valid JSON (e.g., HTML error page), it wraps it in a JSON object.
+// If the body is nil or empty, it returns null.
 func sanitizeResponseBody(body []byte) json.RawMessage {
+	// Handle nil or empty body
+	if len(body) == 0 {
+		return json.RawMessage(`null`)
+	}
+
+	// If valid JSON, use as-is
 	if json.Valid(body) {
 		return json.RawMessage(body)
 	}
-	wrapped, _ := json.Marshal(map[string]string{
+
+	// Not valid JSON — wrap in error object
+	wrapped, err := json.Marshal(map[string]string{
 		"error": "non-JSON response",
 		"raw":   string(body),
 	})
+	if err != nil {
+		// Last resort — this should never happen
+		return json.RawMessage(`{"error":"failed to encode response"}`)
+	}
 	return json.RawMessage(wrapped)
 }
 

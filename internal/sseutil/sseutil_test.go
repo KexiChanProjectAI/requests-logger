@@ -63,12 +63,36 @@ func TestReassembleDataLinesExcludesDone(t *testing.T) {
 
 func TestAssembleFinalStateEmpty(t *testing.T) {
 	result := sseutil.AssembleFinalState([]byte{})
-	var out map[string]interface{}
+	var out interface{}
 	if err := json.Unmarshal(result, &out); err != nil {
 		t.Fatalf("expected valid JSON, got error: %v", err)
 	}
-	if len(out) != 0 {
-		t.Fatalf("expected empty object, got %v", out)
+	if out != nil {
+		t.Fatalf("expected null, got %v", out)
+	}
+}
+
+func TestAssembleFinalStateTruncatedSSE(t *testing.T) {
+	truncated := []byte("data: {\"incomplete")
+	result := sseutil.AssembleFinalState(truncated)
+	var out interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("expected valid JSON from truncated input, got error: %v", err)
+	}
+	if out != nil {
+		t.Fatalf("expected null for truncated SSE, got %v", out)
+	}
+}
+
+func TestAssembleFinalStateOnlyDONE(t *testing.T) {
+	sse := []byte("data: [DONE]\n\n")
+	result := sseutil.AssembleFinalState(sse)
+	var out interface{}
+	if err := json.Unmarshal(result, &out); err != nil {
+		t.Fatalf("expected valid JSON, got error: %v", err)
+	}
+	if out != nil {
+		t.Fatalf("expected null for DONE-only SSE, got %v", out)
 	}
 }
 
