@@ -2,6 +2,7 @@ package sseutil
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 	"sync"
@@ -72,4 +73,177 @@ func HasDone(sse []byte) bool {
 		}
 	}
 	return false
+}
+
+// AssembleFinalState reassembles streaming SSE data into the final complete response object.
+// For the Responses API: extracts the response from the response.completed event.
+// For Chat Completions: merges all delta.content into a single response object.
+func AssembleFinalState(sseData []byte) json.RawMessage {
+	events, err := parseSSEEvents(sseData)
+	if err != nil || len(events) == 0 {
+		return json.RawMessage(`{}`)
+	}
+
+	// Check if this is a Responses API stream (has event types)
+	for _, ev := range events {
+		if ev.Type == "response.completed" {
+			return extractResponsesAPIFinalState(ev.Data)
+		}
+	}
+
+	// Check if this is a Chat Completions stream (has chat.completion.chunk objects)
+	return assembleChatCompletionsFromEvents(events)
+}
+
+// parseSSEEvents parses SSE data and returns events with their Type preserved.
+func parseSSEEvents(sseData []byte) ([]sse.Event, error) {
+	var events []sse.Event
+
+	readEvents := sse.Read(bytes.NewReader(sseData), nil)
+	readEvents(func(event sse.Event, err error) bool {
+		if err != nil {
+			return false
+		}
+		events = append(events, event)
+		return true
+	})
+
+	return events, nil
+}
+
+// extractResponsesAPIFinalState extracts the response object from a response.completed event.
+// The data payload looks like: {"type":"response.completed","response":{...full response...}}
+func extractResponsesAPIFinalState(data string) json.RawMessage {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(data), &payload); err != nil {
+		return json.RawMessage(`{}`)
+	}
+	if resp, ok := payload["response"]; ok {
+		result, _ := json.Marshal(resp)
+		return json.RawMessage(result)
+	}
+	// Fallback: return the whole payload
+	result, _ := json.Marshal(payload)
+	return json.RawMessage(result)
+}
+
+// assembleChatCompletionsFromEvents merges chat completion chunks into a single response.
+func assembleChatCompletionsFromEvents(events []sse.Event) json.RawMessage {
+	// Collect all JSON data payloads (skip [DONE])
+	var chunks []map[string]interface{}
+	for _, ev := range events {
+		data := strings.TrimSpace(ev.Data)
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var chunk map[string]interface{}
+		if err := json.Unmarshal([]byte(data), &chunk); err == nil {
+			chunks = append(chunks, chunk)
+		}
+	}
+
+	if len(chunks) == 0 {
+		return json.RawMessage(`{}`)
+	}
+
+	// Check if this is actually a chat completions stream
+	isChatChunk := false
+	for _, c := range chunks {
+		if obj, ok := c["object"].(string); ok && obj == "chat.completion.chunk" {
+			isChatChunk = true
+			break
+		}
+	}
+
+	if !isChatChunk {
+		// Unknown format — return last event as final state
+		last, _ := json.Marshal(chunks[len(chunks)-1])
+		return json.RawMessage(last)
+	}
+
+	// Assemble chat completions
+	result := make(map[string]interface{})
+
+	// Copy base fields from first chunk
+	first := chunks[0]
+	result["id"] = first["id"]
+	result["object"] = "chat.completion"
+	result["created"] = first["created"]
+	result["model"] = first["model"]
+
+	// Merge choices by index
+	choiceMap := make(map[int]*mergedChoice)
+	for _, chunk := range chunks {
+		choices, ok := chunk["choices"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, c := range choices {
+			choice, ok := c.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			idx := int(choice["index"].(float64))
+
+			if _, exists := choiceMap[idx]; !exists {
+				choiceMap[idx] = &mergedChoice{
+					Index:   idx,
+					Message: make(map[string]interface{}),
+				}
+			}
+			mc := choiceMap[idx]
+
+			// Merge delta into message
+			if delta, ok := choice["delta"].(map[string]interface{}); ok {
+				if role, ok := delta["role"].(string); ok {
+					mc.Message["role"] = role
+				}
+				if content, ok := delta["content"].(string); ok {
+					if existing, ok := mc.Message["content"].(string); ok {
+						mc.Message["content"] = existing + content
+					} else {
+						mc.Message["content"] = content
+					}
+				}
+				if toolCalls, ok := delta["tool_calls"].([]interface{}); ok {
+					mc.Message["tool_calls"] = toolCalls
+				}
+			}
+
+			if fr, ok := choice["finish_reason"]; ok && fr != nil {
+				mc.FinishReason = fr
+			}
+		}
+	}
+
+	// Build choices array
+	choices := make([]map[string]interface{}, 0, len(choiceMap))
+	for i := 0; i < len(choiceMap); i++ {
+		if mc, ok := choiceMap[i]; ok {
+			c := map[string]interface{}{
+				"index":         mc.Index,
+				"message":       mc.Message,
+				"finish_reason": mc.FinishReason,
+			}
+			choices = append(choices, c)
+		}
+	}
+	result["choices"] = choices
+
+	// Take usage from last chunk that has it
+	for i := len(chunks) - 1; i >= 0; i-- {
+		if usage, ok := chunks[i]["usage"]; ok && usage != nil {
+			result["usage"] = usage
+			break
+		}
+	}
+
+	jsonBytes, _ := json.Marshal(result)
+	return json.RawMessage(jsonBytes)
+}
+
+type mergedChoice struct {
+	Index        int
+	Message      map[string]interface{}
+	FinishReason interface{}
 }

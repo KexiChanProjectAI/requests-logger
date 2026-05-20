@@ -453,8 +453,10 @@ func TestStreamingRequestDetectedForwardedAndCaptured(t *testing.T) {
 		ResponseType: "sse",
 		StatusCode:   200,
 		SSEDataFields: []string{
-			`{"choices":[{"delta":{"content":"hello"}}]}`,
-			`{"choices":[{"delta":{"content":" world"}}]}`,
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
 		},
 	})
 	defer fUpstream.Server.Close()
@@ -473,7 +475,7 @@ func TestStreamingRequestDetectedForwardedAndCaptured(t *testing.T) {
 		t.Fatalf("expected status 200, got %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, `data: {"choices":[{"delta":{"content":"hello"}}]}`) {
+	if !strings.Contains(body, `data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk"`) {
 		t.Fatalf("expected first SSE frame in response, got %q", body)
 	}
 	if !strings.Contains(body, "data: [DONE]") {
@@ -488,23 +490,25 @@ func TestStreamingRequestDetectedForwardedAndCaptured(t *testing.T) {
 		t.Fatalf("expected terminal status completed, got %s", record.TerminalStatus)
 	}
 
-	var events []map[string]interface{}
-	if err := json.Unmarshal(record.ResponseBody, &events); err != nil {
-		t.Fatalf("response body should be JSON array: %v", err)
+	var assembled map[string]interface{}
+	if err := json.Unmarshal(record.ResponseBody, &assembled); err != nil {
+		t.Fatalf("response body should be JSON object: %v", err)
 	}
-	if len(events) != 2 {
-		t.Fatalf("expected 2 SSE events, got %d", len(events))
-	}
-	event0, ok := events[0]["choices"].([]interface{})
+	choices, ok := assembled["choices"].([]interface{})
 	if !ok {
-		t.Fatalf("expected choices in first event, got %v", events[0])
+		t.Fatalf("expected choices in assembled response, got %v", assembled)
 	}
-	event1, ok := events[1]["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("expected 1 assembled choice, got %d", len(choices))
+	}
+	choice := choices[0].(map[string]interface{})
+	msg, ok := choice["message"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("expected choices in second event, got %v", events[1])
+		t.Fatalf("expected message in assembled choice, got %v", choice)
 	}
-	_ = event0
-	_ = event1
+	if msg["content"] != "hello world" {
+		t.Errorf("expected merged content 'hello world', got %v", msg["content"])
+	}
 }
 
 func TestStreamingFramesForwardedInRealTime(t *testing.T) {

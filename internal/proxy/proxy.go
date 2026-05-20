@@ -226,24 +226,7 @@ outerLoop:
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
-	dataLines := sseutil.DataLines(captured)
-	var events []json.RawMessage
-	for _, line := range dataLines {
-		if line == "[DONE]" {
-			continue
-		}
-		if json.Valid([]byte(line)) {
-			events = append(events, json.RawMessage(line))
-		}
-	}
-
-	var respBodyJSON json.RawMessage
-	if len(events) > 0 {
-		eventsJSON, _ := json.Marshal(events)
-		respBodyJSON = eventsJSON
-	} else {
-		respBodyJSON = json.RawMessage(`[]`)
-	}
+	respBodyJSON := sseutil.AssembleFinalState(captured)
 	record := h.newRecord(r, logID, requestID, startTime, terminalStatus, resp.StatusCode, reqBody, resp.Header, respBodyJSON, true, upstreamURL)
 	if h.cfg.CaptureMaxBytes > 0 {
 		h.applyCaptureMax(record)
