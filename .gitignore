@@ -24,6 +24,9 @@ logs/
 # Sisyphus internal state
 .sisyphus/
 
+# OpenCode config
+.opencode/
+
 # Environment files with secrets
 .env
 
