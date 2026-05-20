@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log"
@@ -108,7 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	record.SetRequestHeaders(r.Header)
 	record.RequestBody = reqBody
 	record.SetResponseHeaders(resp.Header)
-	record.ResponseBody = respBody
+	record.ResponseBody = sanitizeResponseBody(respBody)
 	record.UpstreamStatus = resp.StatusCode
 	record.Stream = false
 
@@ -130,6 +129,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 	w.Write(respBody)
+}
+
+// sanitizeResponseBody ensures response body is stored as valid JSON.
+// If the body is valid JSON, it returns it as-is wrapped in json.RawMessage.
+// If not valid JSON (e.g., HTML error page), it wraps it in a JSON object.
+func sanitizeResponseBody(body []byte) json.RawMessage {
+	if json.Valid(body) {
+		return json.RawMessage(body)
+	}
+	wrapped, _ := json.Marshal(map[string]string{
+		"error": "non-JSON response",
+		"raw":   string(body),
+	})
+	return json.RawMessage(wrapped)
 }
 
 func requestIsStream(reqBody []byte) bool {
@@ -213,8 +226,24 @@ outerLoop:
 		upstreamURL += "?" + r.URL.RawQuery
 	}
 
-	capturedB64 := base64.StdEncoding.EncodeToString(captured)
-	respBodyJSON, _ := json.Marshal(capturedB64)
+	dataLines := sseutil.DataLines(captured)
+	var events []json.RawMessage
+	for _, line := range dataLines {
+		if line == "[DONE]" {
+			continue
+		}
+		if json.Valid([]byte(line)) {
+			events = append(events, json.RawMessage(line))
+		}
+	}
+
+	var respBodyJSON json.RawMessage
+	if len(events) > 0 {
+		eventsJSON, _ := json.Marshal(events)
+		respBodyJSON = eventsJSON
+	} else {
+		respBodyJSON = json.RawMessage(`[]`)
+	}
 	record := h.newRecord(r, logID, requestID, startTime, terminalStatus, resp.StatusCode, reqBody, resp.Header, respBodyJSON, true, upstreamURL)
 	if h.cfg.CaptureMaxBytes > 0 {
 		h.applyCaptureMax(record)

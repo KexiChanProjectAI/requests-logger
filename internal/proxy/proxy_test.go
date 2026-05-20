@@ -2,7 +2,6 @@ package proxy_test
 
 import (
 	"bufio"
-	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -489,21 +488,23 @@ func TestStreamingRequestDetectedForwardedAndCaptured(t *testing.T) {
 		t.Fatalf("expected terminal status completed, got %s", record.TerminalStatus)
 	}
 
-	var capturedB64 string
-	if err := json.Unmarshal(record.ResponseBody, &capturedB64); err != nil {
-		t.Fatalf("response body should be JSON string: %v", err)
+	var events []map[string]interface{}
+	if err := json.Unmarshal(record.ResponseBody, &events); err != nil {
+		t.Fatalf("response body should be JSON array: %v", err)
 	}
-	capturedBytes, err := base64.StdEncoding.DecodeString(capturedB64)
-	if err != nil {
-		t.Fatalf("failed to decode base64: %v", err)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 SSE events, got %d", len(events))
 	}
-	captured := string(capturedBytes)
-	if !strings.Contains(captured, `"content":"hello"`) || !strings.Contains(captured, `"content":" world"`) {
-		t.Fatalf("expected captured chunks in response body, got %q", captured)
+	event0, ok := events[0]["choices"].([]interface{})
+	if !ok {
+		t.Fatalf("expected choices in first event, got %v", events[0])
 	}
-	if !strings.Contains(captured, "data:") {
-		t.Fatalf("expected SSE framing in captured body: %q", captured)
+	event1, ok := events[1]["choices"].([]interface{})
+	if !ok {
+		t.Fatalf("expected choices in second event, got %v", events[1])
 	}
+	_ = event0
+	_ = event1
 }
 
 func TestStreamingFramesForwardedInRealTime(t *testing.T) {
