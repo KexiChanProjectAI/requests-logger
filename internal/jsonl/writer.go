@@ -3,27 +3,28 @@ package jsonl
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/user/openai-go-proxy-logger/internal/archiver"
 	"github.com/user/openai-go-proxy-logger/internal/config"
 	"github.com/user/openai-go-proxy-logger/internal/logschema"
 )
 
-const (
-	// staleTimeout is the duration after which a file handle is considered stale.
-	staleTimeout = 5 * time.Minute
-	// cleanupInterval is how often the cleanup goroutine checks for stale handles.
+var (
+	staleTimeout    = 5 * time.Minute
 	cleanupInterval = 1 * time.Minute
 )
 
 // fileHandle holds an open file and its last-write timestamp.
 type fileHandle struct {
 	file      *os.File
-	mu        sync.Mutex // protects writes to this file
+	mu        sync.Mutex
 	lastWrite time.Time
+	filePath  string
 }
 
 // Writer writes log records to hourly JSONL files.
@@ -72,10 +73,21 @@ func (w *Writer) closeStaleHandles() {
 	for hour, fh := range w.handles {
 		fh.mu.Lock()
 		if now.Sub(fh.lastWrite) > staleTimeout {
+			filePath := fh.filePath
 			fh.file.Close()
 			delete(w.handles, hour)
+			fh.mu.Unlock()
+
+			if w.config.ArchiveEnabled {
+				go func(path string) {
+					if _, err := archiver.ArchiveFile(path); err != nil {
+						log.Printf("Failed to archive %s: %v", path, err)
+					}
+				}(filePath)
+			}
+		} else {
+			fh.mu.Unlock()
 		}
-		fh.mu.Unlock()
 	}
 }
 
@@ -145,6 +157,7 @@ func (w *Writer) getHandle(filePath string) *fileHandle {
 	fh := &fileHandle{
 		file:      file,
 		lastWrite: time.Now(),
+		filePath:  filePath,
 	}
 	w.handles[filePath] = fh
 	return fh

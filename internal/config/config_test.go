@@ -81,6 +81,9 @@ func TestLogServerConfigDefaults(t *testing.T) {
 	if cfg.UTCHourlyLayout != "2006/01/02/15" {
 		t.Errorf("expected UTCHourlyLayout default 2006/01/02/15, got %q", cfg.UTCHourlyLayout)
 	}
+	if !cfg.ArchiveEnabled {
+		t.Errorf("expected ArchiveEnabled default true, got %v", cfg.ArchiveEnabled)
+	}
 }
 
 func TestLogServerConfigEnvOverrides(t *testing.T) {
@@ -89,6 +92,7 @@ func TestLogServerConfigEnvOverrides(t *testing.T) {
 	os.Setenv("LOG_SERVER_TOKEN", "log-token")
 	os.Setenv("LOG_DIR", "/var/log/openai-proxy")
 	os.Setenv("UTC_HOURLY_LAYOUT", "2006-01-02-15")
+	os.Setenv("ARCHIVE_ENABLED", "false")
 	defer unsetAllLogServerEnv()
 
 	cfg := LoadLogServerConfig()
@@ -104,6 +108,9 @@ func TestLogServerConfigEnvOverrides(t *testing.T) {
 	}
 	if cfg.UTCHourlyLayout != "2006-01-02-15" {
 		t.Errorf("expected UTCHourlyLayout 2006-01-02-15, got %q", cfg.UTCHourlyLayout)
+	}
+	if cfg.ArchiveEnabled {
+		t.Errorf("expected ArchiveEnabled false, got %v", cfg.ArchiveEnabled)
 	}
 }
 
@@ -132,4 +139,5 @@ func unsetAllLogServerEnv() {
 	os.Unsetenv("LOG_SERVER_TOKEN")
 	os.Unsetenv("LOG_DIR")
 	os.Unsetenv("UTC_HOURLY_LAYOUT")
+	os.Unsetenv("ARCHIVE_ENABLED")
 }

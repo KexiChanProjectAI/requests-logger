@@ -21,6 +21,7 @@ type LogServerConfig struct {
 	LogServerToken    string
 	LogDir            string
 	UTCHourlyLayout   string
+	ArchiveEnabled    bool
 }
 
 // LoadProxyConfig loads proxy configuration from environment variables.
@@ -48,12 +49,14 @@ func LoadProxyConfig() ProxyConfig {
 //   - LOG_SERVER_TOKEN: token for authentication (default "")
 //   - LOG_DIR: directory for log files (default "")
 //   - UTC_HOURLY_LAYOUT: Go time layout for hourly log files in UTC (default "2006/01/02/15")
+//   - ARCHIVE_ENABLED: whether to compress stale JSONL files to .tar.zst (default "true")
 func LoadLogServerConfig() LogServerConfig {
 	return LogServerConfig{
 		ListenAddr:       os.Getenv("LISTEN_ADDR"),
 		LogServerToken:   os.Getenv("LOG_SERVER_TOKEN"),
 		LogDir:           os.Getenv("LOG_DIR"),
 		UTCHourlyLayout:  getEnvOrDefault("UTC_HOURLY_LAYOUT", "2006/01/02/15"),
+		ArchiveEnabled:   getEnvBoolOrDefault("ARCHIVE_ENABLED", true),
 	}
 }
 
@@ -69,6 +72,13 @@ func getEnvIntOrDefault(key string, defaultVal int) int {
 		if intVal, err := strconv.Atoi(val); err == nil {
 			return intVal
 		}
+	}
+	return defaultVal
+}
+
+func getEnvBoolOrDefault(key string, defaultVal bool) bool {
+	if val := os.Getenv(key); val != "" {
+		return val == "1" || val == "true" || val == "yes"
 	}
 	return defaultVal
 }

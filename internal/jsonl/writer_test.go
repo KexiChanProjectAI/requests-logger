@@ -314,3 +314,112 @@ func TestWriteMultipleRecordsSameHour(t *testing.T) {
 		t.Errorf("Expected %d records, got %d", numRecords, len(lines))
 	}
 }
+
+func TestStaleFileArchived(t *testing.T) {
+	origStaleTimeout := staleTimeout
+	staleTimeout = 10 * time.Millisecond
+	origCleanupInterval := cleanupInterval
+	cleanupInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		staleTimeout = origStaleTimeout
+		cleanupInterval = origCleanupInterval
+	})
+
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:          logDir,
+		UTCHourlyLayout: "2006/01/02/15",
+		ArchiveEnabled:  true,
+	}
+
+	w := NewWriter(cfg)
+
+	ts := time.Date(2026, 5, 20, 14, 30, 0, 0, time.UTC)
+	record := &logschema.Record{
+		LogID:             "log-archive-test",
+		RequestID:         "req-archive-test",
+		Route:             "/v1/chat/completions",
+		Method:            "POST",
+		URL:               "https://api.openai.com/v1/chat/completions",
+		RequestTimestamp:  ts,
+		ResponseTimestamp: ts.Add(100 * time.Millisecond),
+		TerminalStatus:    logschema.TerminalStatusCompleted,
+	}
+
+	if err := w.Write(record); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	expectedJSONL := filepath.Join(logDir, "2026/05/20/14.jsonl")
+	expectedArchive := filepath.Join(logDir, "2026/05/20/14.tar.zst")
+
+	time.Sleep(200 * time.Millisecond)
+
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(expectedArchive); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if _, err := os.Stat(expectedJSONL); !os.IsNotExist(err) {
+		t.Errorf("JSONL file should have been deleted, but still exists")
+	}
+
+	if _, err := os.Stat(expectedArchive); os.IsNotExist(err) {
+		t.Errorf("Archive file should exist at %s", expectedArchive)
+	}
+
+	w.Close()
+}
+
+func TestArchiveDisabled(t *testing.T) {
+	origStaleTimeout := staleTimeout
+	staleTimeout = 10 * time.Millisecond
+	origCleanupInterval := cleanupInterval
+	cleanupInterval = 10 * time.Millisecond
+	t.Cleanup(func() {
+		staleTimeout = origStaleTimeout
+		cleanupInterval = origCleanupInterval
+	})
+
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:          logDir,
+		UTCHourlyLayout: "2006/01/02/15",
+		ArchiveEnabled:  false,
+	}
+
+	w := NewWriter(cfg)
+
+	ts := time.Date(2026, 5, 20, 14, 30, 0, 0, time.UTC)
+	record := &logschema.Record{
+		LogID:             "log-no-archive",
+		RequestID:         "req-no-archive",
+		Route:             "/v1/chat/completions",
+		Method:            "POST",
+		URL:               "https://api.openai.com/v1/chat/completions",
+		RequestTimestamp:  ts,
+		ResponseTimestamp: ts.Add(100 * time.Millisecond),
+		TerminalStatus:    logschema.TerminalStatusCompleted,
+	}
+
+	if err := w.Write(record); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	expectedJSONL := filepath.Join(logDir, "2026/05/20/14.jsonl")
+	expectedArchive := filepath.Join(logDir, "2026/05/20/14.tar.zst")
+
+	time.Sleep(100 * time.Millisecond)
+
+	w.Close()
+
+	if _, err := os.Stat(expectedJSONL); os.IsNotExist(err) {
+		t.Errorf("JSONL file should still exist when archiving is disabled")
+	}
+
+	if _, err := os.Stat(expectedArchive); !os.IsNotExist(err) {
+		t.Errorf("Archive file should NOT exist when archiving is disabled")
+	}
+}
