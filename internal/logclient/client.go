@@ -78,13 +78,20 @@ func (c *Client) worker() {
 				c.sendWithRetry(record)
 			}
 			return
-		case record := <-c.ch:
+		case record, ok := <-c.ch:
+			if !ok {
+				return
+			}
 			c.sendWithRetry(record)
 		}
 	}
 }
 
 func (c *Client) sendWithRetry(record *logschema.Record) {
+	if record == nil {
+		return
+	}
+
 	const maxRetries = 3
 	backoff := 100 * time.Millisecond
 

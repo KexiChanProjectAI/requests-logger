@@ -244,3 +244,27 @@ func TestEnqueueNeverBlocks(t *testing.T) {
 	wg.Wait()
 	client.Stop()
 }
+
+func TestStopDoesNotPanicWhenWorkerReceivesClosedChannel(t *testing.T) {
+	cfg := config.ProxyConfig{
+		LogServerURL:   "http://localhost:9999",
+		LogServerToken: "test-token",
+		LogQueueSize:   1,
+	}
+
+	client := logclient.NewClient(cfg)
+	client.Start()
+	client.Enqueue(logschema.NewRecord())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Stop()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop did not return")
+	}
+}
