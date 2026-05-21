@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"fmt"
 	"io"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,11 +12,16 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+type Options struct {
+	WindowSizeMB       int
+	EncoderConcurrency int
+}
+
 // ArchiveFile compresses the given file into a .tar.zst archive using zstd max compression.
 // The archive contains the file with its base name (no directory).
 // After successful compression, the original file is deleted.
 // Returns the path to the created archive.
-func ArchiveFile(filePath string) (string, error) {
+func ArchiveFile(filePath string, opts Options) (string, error) {
 	// Check if file exists
 	info, err := os.Stat(filePath)
 	if err != nil {
@@ -45,7 +51,12 @@ func ArchiveFile(filePath string) (string, error) {
 	defer dst.Close()
 
 	// Create zstd encoder with max compression (level 22)
-	encoder, err := zstd.NewWriter(dst, zstd.WithEncoderLevel(zstd.SpeedBestCompression))
+	encoder, err := zstd.NewWriter(
+		dst,
+		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
+		zstd.WithWindowSize(normalizeWindowSize(opts.WindowSizeMB)),
+		zstd.WithEncoderConcurrency(normalizeEncoderConcurrency(opts.EncoderConcurrency)),
+	)
 	if err != nil {
 		return "", fmt.Errorf("create zstd encoder: %w", err)
 	}
@@ -86,6 +97,32 @@ func ArchiveFile(filePath string) (string, error) {
 	}
 
 	return archivePath, nil
+}
+
+func normalizeWindowSize(windowSizeMB int) int {
+	if windowSizeMB <= 0 {
+		return zstd.MaxWindowSize
+	}
+
+	windowSizeBytes := windowSizeMB << 20
+	if windowSizeBytes < zstd.MinWindowSize {
+		return zstd.MinWindowSize
+	}
+	if windowSizeBytes > zstd.MaxWindowSize {
+		return zstd.MaxWindowSize
+	}
+	if windowSizeBytes&(windowSizeBytes-1) == 0 {
+		return windowSizeBytes
+	}
+
+	return 1 << (bits.Len(uint(windowSizeBytes)) - 1)
+}
+
+func normalizeEncoderConcurrency(concurrency int) int {
+	if concurrency < 0 {
+		return 0
+	}
+	return concurrency
 }
 
 // IsArchived checks if a .tar.zst archive exists for the given base file path.

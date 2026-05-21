@@ -2,12 +2,15 @@ package jsonl
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/user/openai-go-proxy-logger/internal/archiver"
 	"github.com/user/openai-go-proxy-logger/internal/config"
 	"github.com/user/openai-go-proxy-logger/internal/logschema"
 	"github.com/user/openai-go-proxy-logger/internal/testutil"
@@ -244,9 +247,10 @@ func TestStaleHandlesClosed(t *testing.T) {
 	}
 
 	w := &Writer{
-		config:  cfg,
-		handles: make(map[string]*fileHandle),
-		stopCh:  make(chan struct{}),
+		config:      cfg,
+		handles:     make(map[string]*fileHandle),
+		stopCh:      make(chan struct{}),
+		archiveOpts: archiver.Options{},
 	}
 
 	filePath := filepath.Join(logDir, "2026-05-20T14.jsonl")
@@ -421,5 +425,78 @@ func TestArchiveDisabled(t *testing.T) {
 
 	if _, err := os.Stat(expectedArchive); !os.IsNotExist(err) {
 		t.Errorf("Archive file should NOT exist when archiving is disabled")
+	}
+}
+
+func TestCloseWaitsForQueuedArchives(t *testing.T) {
+	origArchiveFile := archiveFile
+	defer func() { archiveFile = origArchiveFile }()
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	archiveFile = func(path string, opts archiver.Options) (string, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		<-release
+		return path + ".tar.zst", nil
+	}
+
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:               logDir,
+		UTCHourlyLayout:      "2006-01-02T15",
+		ArchiveEnabled:       true,
+		ArchiveMaxConcurrent: 1,
+	}
+
+	w := &Writer{
+		config:      cfg,
+		handles:     make(map[string]*fileHandle),
+		stopCh:      make(chan struct{}),
+		archiveSem:  make(chan struct{}, 1),
+		archiveOpts: archiver.Options{},
+	}
+
+	for i := 0; i < 2; i++ {
+		filePath := filepath.Join(logDir, fmt.Sprintf("2026-05-20T1%d.jsonl", i))
+		file, err := os.Create(filePath)
+		if err != nil {
+			t.Fatalf("create file: %v", err)
+		}
+		w.handles[filePath] = &fileHandle{
+			file:      file,
+			lastWrite: time.Now().Add(-10 * time.Minute),
+			filePath:  filePath,
+		}
+	}
+
+	w.closeStaleHandles()
+	<-started
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- w.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before archive jobs were released: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not wait for queued archive jobs")
+	}
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("expected 2 archive jobs, got %d", got)
 	}
 }

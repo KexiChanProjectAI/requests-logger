@@ -44,6 +44,10 @@ Client  -->  [Proxy]  -->  OpenAI API
 | LOG_SERVER_TOKEN | Bearer token for authenticating proxy requests | (empty) |
 | LOG_DIR | Directory for JSONL log files | (empty, current directory) |
 | UTC_HOURLY_LAYOUT | Go time layout for hourly file naming in UTC | 2006-01-02T00:00:00Z |
+| ARCHIVE_ENABLED | Compress stale JSONL files to `.tar.zst` | true |
+| ARCHIVE_ZSTD_WINDOW_MB | ZSTD search window in MiB, power of two, capped at 512 | 512 |
+| ARCHIVE_ZSTD_CONCURRENCY | ZSTD encoder concurrency per archive job | 8 |
+| ARCHIVE_MAX_CONCURRENT | Maximum archive jobs running simultaneously | 1 |
 
 ## Quickstart
 

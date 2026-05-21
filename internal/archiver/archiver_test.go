@@ -11,6 +11,8 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+var testOptions = Options{}
+
 func TestArchiveFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -24,7 +26,7 @@ func TestArchiveFile(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	archivePath, err := ArchiveFile(jsonlPath)
+	archivePath, err := ArchiveFile(jsonlPath, testOptions)
 	if err != nil {
 		t.Fatalf("ArchiveFile failed: %v", err)
 	}
@@ -56,7 +58,7 @@ func TestArchiveFileContent(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 
-	archivePath, err := ArchiveFile(jsonlPath)
+	archivePath, err := ArchiveFile(jsonlPath, testOptions)
 	if err != nil {
 		t.Fatalf("ArchiveFile failed: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestArchiveFileAlreadyArchived(t *testing.T) {
 		t.Fatalf("write archive file: %v", err)
 	}
 
-	resultPath, err := ArchiveFile(jsonlPath)
+	resultPath, err := ArchiveFile(jsonlPath, testOptions)
 	if err != nil {
 		t.Fatalf("ArchiveFile should not fail when archive exists: %v", err)
 	}
@@ -155,8 +157,20 @@ func TestArchiveFileAlreadyArchived(t *testing.T) {
 }
 
 func TestArchiveFileNotFound(t *testing.T) {
-	_, err := ArchiveFile("/nonexistent/path/14.jsonl")
+	_, err := ArchiveFile("/nonexistent/path/14.jsonl", testOptions)
 	if err == nil {
 		t.Errorf("ArchiveFile should return error for nonexistent file")
+	}
+}
+
+func TestNormalizeWindowSize(t *testing.T) {
+	if got := normalizeWindowSize(512); got != zstd.MaxWindowSize {
+		t.Fatalf("expected max window size %d, got %d", zstd.MaxWindowSize, got)
+	}
+	if got := normalizeWindowSize(300); got != 256<<20 {
+		t.Fatalf("expected window size rounded down to 256 MiB, got %d", got)
+	}
+	if got := normalizeWindowSize(0); got != zstd.MaxWindowSize {
+		t.Fatalf("expected zero to default to max window size, got %d", got)
 	}
 }

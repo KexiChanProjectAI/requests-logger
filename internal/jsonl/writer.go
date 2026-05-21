@@ -17,6 +17,7 @@ import (
 var (
 	staleTimeout    = 5 * time.Minute
 	cleanupInterval = 1 * time.Minute
+	archiveFile     = archiver.ArchiveFile
 )
 
 // fileHandle holds an open file and its last-write timestamp.
@@ -29,11 +30,14 @@ type fileHandle struct {
 
 // Writer writes log records to hourly JSONL files.
 type Writer struct {
-	config   config.LogServerConfig
-	handles  map[string]*fileHandle
-	handlesMu sync.Mutex
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	config        config.LogServerConfig
+	handles       map[string]*fileHandle
+	handlesMu      sync.Mutex
+	stopCh        chan struct{}
+	archiveSem    chan struct{}
+	archiveOpts   archiver.Options
+	cleanupWG     sync.WaitGroup
+	archiveWG     sync.WaitGroup
 }
 
 // NewWriter creates a new JSONL writer that writes to files in LogDir.
@@ -44,15 +48,22 @@ func NewWriter(cfg config.LogServerConfig) *Writer {
 		config:  cfg,
 		handles: make(map[string]*fileHandle),
 		stopCh:  make(chan struct{}),
+		archiveOpts: archiver.Options{
+			WindowSizeMB:       cfg.ArchiveZstdWindowMB,
+			EncoderConcurrency: cfg.ArchiveZstdConcurrency,
+		},
 	}
-	w.wg.Add(1)
+	if cfg.ArchiveMaxConcurrent > 0 {
+		w.archiveSem = make(chan struct{}, cfg.ArchiveMaxConcurrent)
+	}
+	w.cleanupWG.Add(1)
 	go w.cleanupLoop()
 	return w
 }
 
 // cleanupLoop periodically closes stale file handles.
 func (w *Writer) cleanupLoop() {
-	defer w.wg.Done()
+	defer w.cleanupWG.Done()
 	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
 	for {
@@ -67,8 +78,9 @@ func (w *Writer) cleanupLoop() {
 
 // closeStaleHandles closes file handles that haven't been written to in staleTimeout.
 func (w *Writer) closeStaleHandles() {
+	var archivePaths []string
+
 	w.handlesMu.Lock()
-	defer w.handlesMu.Unlock()
 	now := time.Now()
 	for hour, fh := range w.handles {
 		fh.mu.Lock()
@@ -79,16 +91,33 @@ func (w *Writer) closeStaleHandles() {
 			fh.mu.Unlock()
 
 			if w.config.ArchiveEnabled {
-				go func(path string) {
-					if _, err := archiver.ArchiveFile(path); err != nil {
-						log.Printf("Failed to archive %s: %v", path, err)
-					}
-				}(filePath)
+				archivePaths = append(archivePaths, filePath)
 			}
 		} else {
 			fh.mu.Unlock()
 		}
 	}
+	w.handlesMu.Unlock()
+
+	for _, path := range archivePaths {
+		w.startArchive(path)
+	}
+}
+
+func (w *Writer) startArchive(path string) {
+	w.archiveWG.Add(1)
+	go func() {
+		defer w.archiveWG.Done()
+		if w.archiveSem != nil {
+			w.archiveSem <- struct{}{}
+			defer func() {
+				<-w.archiveSem
+			}()
+		}
+		if _, err := archiveFile(path, w.archiveOpts); err != nil {
+			log.Printf("Failed to archive %s: %v", path, err)
+		}
+	}()
 }
 
 // filePathForTime returns the JSONL file path for the given UTC time.
@@ -167,12 +196,10 @@ func (w *Writer) getHandle(filePath string) *fileHandle {
 func (w *Writer) Close() error {
 	// Signal the cleanup goroutine to stop
 	close(w.stopCh)
-	w.wg.Wait()
+	w.cleanupWG.Wait()
 
 	// Close all file handles
 	w.handlesMu.Lock()
-	defer w.handlesMu.Unlock()
-
 	var errs []error
 	for path, fh := range w.handles {
 		if err := fh.file.Close(); err != nil {
@@ -180,6 +207,9 @@ func (w *Writer) Close() error {
 		}
 	}
 	w.handles = make(map[string]*fileHandle)
+	w.handlesMu.Unlock()
+
+	w.archiveWG.Wait()
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing files: %v", errs)

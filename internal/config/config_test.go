@@ -84,6 +84,15 @@ func TestLogServerConfigDefaults(t *testing.T) {
 	if !cfg.ArchiveEnabled {
 		t.Errorf("expected ArchiveEnabled default true, got %v", cfg.ArchiveEnabled)
 	}
+	if cfg.ArchiveZstdWindowMB != 512 {
+		t.Errorf("expected ArchiveZstdWindowMB default 512, got %d", cfg.ArchiveZstdWindowMB)
+	}
+	if cfg.ArchiveZstdConcurrency != 8 {
+		t.Errorf("expected ArchiveZstdConcurrency default 8, got %d", cfg.ArchiveZstdConcurrency)
+	}
+	if cfg.ArchiveMaxConcurrent != 1 {
+		t.Errorf("expected ArchiveMaxConcurrent default 1, got %d", cfg.ArchiveMaxConcurrent)
+	}
 }
 
 func TestLogServerConfigEnvOverrides(t *testing.T) {
@@ -93,6 +102,9 @@ func TestLogServerConfigEnvOverrides(t *testing.T) {
 	os.Setenv("LOG_DIR", "/var/log/openai-proxy")
 	os.Setenv("UTC_HOURLY_LAYOUT", "2006-01-02-15")
 	os.Setenv("ARCHIVE_ENABLED", "false")
+	os.Setenv("ARCHIVE_ZSTD_WINDOW_MB", "256")
+	os.Setenv("ARCHIVE_ZSTD_CONCURRENCY", "4")
+	os.Setenv("ARCHIVE_MAX_CONCURRENT", "2")
 	defer unsetAllLogServerEnv()
 
 	cfg := LoadLogServerConfig()
@@ -111,6 +123,15 @@ func TestLogServerConfigEnvOverrides(t *testing.T) {
 	}
 	if cfg.ArchiveEnabled {
 		t.Errorf("expected ArchiveEnabled false, got %v", cfg.ArchiveEnabled)
+	}
+	if cfg.ArchiveZstdWindowMB != 256 {
+		t.Errorf("expected ArchiveZstdWindowMB 256, got %d", cfg.ArchiveZstdWindowMB)
+	}
+	if cfg.ArchiveZstdConcurrency != 4 {
+		t.Errorf("expected ArchiveZstdConcurrency 4, got %d", cfg.ArchiveZstdConcurrency)
+	}
+	if cfg.ArchiveMaxConcurrent != 2 {
+		t.Errorf("expected ArchiveMaxConcurrent 2, got %d", cfg.ArchiveMaxConcurrent)
 	}
 }
 
@@ -140,4 +161,7 @@ func unsetAllLogServerEnv() {
 	os.Unsetenv("LOG_DIR")
 	os.Unsetenv("UTC_HOURLY_LAYOUT")
 	os.Unsetenv("ARCHIVE_ENABLED")
+	os.Unsetenv("ARCHIVE_ZSTD_WINDOW_MB")
+	os.Unsetenv("ARCHIVE_ZSTD_CONCURRENCY")
+	os.Unsetenv("ARCHIVE_MAX_CONCURRENT")
 }

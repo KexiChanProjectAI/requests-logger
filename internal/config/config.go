@@ -22,6 +22,9 @@ type LogServerConfig struct {
 	LogDir            string
 	UTCHourlyLayout   string
 	ArchiveEnabled    bool
+	ArchiveZstdWindowMB int
+	ArchiveZstdConcurrency int
+	ArchiveMaxConcurrent int
 }
 
 // LoadProxyConfig loads proxy configuration from environment variables.
@@ -50,6 +53,9 @@ func LoadProxyConfig() ProxyConfig {
 //   - LOG_DIR: directory for log files (default "")
 //   - UTC_HOURLY_LAYOUT: Go time layout for hourly log files in UTC (default "2006/01/02/15")
 //   - ARCHIVE_ENABLED: whether to compress stale JSONL files to .tar.zst (default "true")
+//   - ARCHIVE_ZSTD_WINDOW_MB: zstd search window in MiB, power of two, max 512 (default 512)
+//   - ARCHIVE_ZSTD_CONCURRENCY: zstd encoder concurrency per archive (default 8)
+//   - ARCHIVE_MAX_CONCURRENT: max archive jobs running at once (default 1)
 func LoadLogServerConfig() LogServerConfig {
 	return LogServerConfig{
 		ListenAddr:       os.Getenv("LISTEN_ADDR"),
@@ -57,6 +63,9 @@ func LoadLogServerConfig() LogServerConfig {
 		LogDir:           os.Getenv("LOG_DIR"),
 		UTCHourlyLayout:  getEnvOrDefault("UTC_HOURLY_LAYOUT", "2006/01/02/15"),
 		ArchiveEnabled:   getEnvBoolOrDefault("ARCHIVE_ENABLED", true),
+		ArchiveZstdWindowMB: getEnvIntOrDefault("ARCHIVE_ZSTD_WINDOW_MB", 512),
+		ArchiveZstdConcurrency: getEnvIntOrDefault("ARCHIVE_ZSTD_CONCURRENCY", 8),
+		ArchiveMaxConcurrent: getEnvIntOrDefault("ARCHIVE_MAX_CONCURRENT", 1),
 	}
 }
 
