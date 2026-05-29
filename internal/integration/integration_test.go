@@ -558,3 +558,151 @@ func TestDurationGreaterThanZero(t *testing.T) {
 		t.Errorf("duration_ms should be >= 0, got %d", rec.DurationMs)
 	}
 }
+
+func TestIntegration_RouteFiltering_AllowedRoute(t *testing.T) {
+	h := newTestHarness(t, testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": 1234567890,
+			"model":   "gpt-4o",
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role":    "assistant",
+						"content": "Hello from chat",
+					},
+					"finish_reason": "stop",
+				},
+			},
+		},
+	})
+
+	body := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"stream": false,
+	}
+
+	switch resp, _ := h.doRequest("POST", "/v1/chat/completions", body); {
+	case resp.StatusCode != 200:
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Wait for log delivery
+	if err := h.waitForJSONL(); err != nil {
+		t.Fatalf("waitForJSONL failed: %v", err)
+	}
+
+	// Read and verify JSONL records
+	records, err := h.readJSONLRecords()
+	if err != nil {
+		t.Fatalf("readJSONLRecords failed: %v", err)
+	}
+
+	// Should have exactly 1 record for allowed route
+	if len(records) != 1 {
+		t.Fatalf("expected exactly 1 JSONL record, got %d", len(records))
+	}
+
+	rec := records[0]
+	if rec.Route != "/v1/chat/completions" {
+		t.Errorf("route = %s, want /v1/chat/completions", rec.Route)
+	}
+	if rec.UpstreamStatus != 200 {
+		t.Errorf("upstream_status = %d, want 200", rec.UpstreamStatus)
+	}
+	if rec.TerminalStatus != logschema.TerminalStatusCompleted {
+		t.Errorf("terminal_status = %s, want %s", rec.TerminalStatus, logschema.TerminalStatusCompleted)
+	}
+}
+
+func TestIntegration_RouteFiltering_ExcludedRoute(t *testing.T) {
+	h := newTestHarness(t, testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{
+			"status": "ok",
+			"data":   "admin dashboard",
+		},
+	})
+
+	// Request to excluded /admin route - should still proxy successfully
+	switch resp, _ := h.doRequest("GET", "/admin", nil); {
+	case resp.StatusCode != 200:
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	// Wait for any potential log delivery
+	if err := h.waitForJSONL(); err != nil {
+		t.Fatalf("waitForJSONL failed: %v", err)
+	}
+
+	// Read JSONL records - should have 0 records for excluded route
+	records, err := h.readJSONLRecords()
+	if err != nil {
+		t.Fatalf("readJSONLRecords failed: %v", err)
+	}
+
+	if len(records) != 0 {
+		t.Fatalf("expected 0 JSONL records for excluded /admin route, got %d", len(records))
+	}
+}
+
+func TestIntegration_RouteFiltering_ErrorAllowedRoute(t *testing.T) {
+	h := newTestHarness(t, testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   500,
+		ResponseBody: map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "internal server error",
+				"type":    "server_error",
+			},
+		},
+	})
+
+	body := map[string]interface{}{
+		"model": "gpt-4o",
+		"messages": []map[string]interface{}{
+			{"role": "user", "content": "Hello"},
+		},
+		"stream": false,
+	}
+
+	switch resp, _ := h.doRequest("POST", "/v1/chat/completions", body); {
+	case resp.StatusCode != 500:
+		t.Fatalf("expected status 500, got %d", resp.StatusCode)
+	}
+
+	// Wait for log delivery
+	if err := h.waitForJSONL(); err != nil {
+		t.Fatalf("waitForJSONL failed: %v", err)
+	}
+
+	// Read and verify JSONL records
+	records, err := h.readJSONLRecords()
+	if err != nil {
+		t.Fatalf("readJSONLRecords failed: %v", err)
+	}
+
+	// Should have exactly 1 record for allowed route even with error
+	if len(records) != 1 {
+		t.Fatalf("expected exactly 1 JSONL record, got %d", len(records))
+	}
+
+	rec := records[0]
+	if rec.Route != "/v1/chat/completions" {
+		t.Errorf("route = %s, want /v1/chat/completions", rec.Route)
+	}
+	if rec.UpstreamStatus != 500 {
+		t.Errorf("upstream_status = %d, want 500", rec.UpstreamStatus)
+	}
+	if rec.TerminalStatus != logschema.TerminalStatusUpstreamError {
+		t.Errorf("terminal_status = %s, want %s", rec.TerminalStatus, logschema.TerminalStatusUpstreamError)
+	}
+}

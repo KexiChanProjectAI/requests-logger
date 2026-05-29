@@ -790,3 +790,368 @@ func TestXForwardedHostAndProto(t *testing.T) {
 		t.Error("expected X-Forwarded-Proto header to be set")
 	}
 }
+func TestProxyRouteFiltering_NonStreaming(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test", "object": "chat.completion", "created": 1234567890, "model": "gpt-4o", "choices": []map[string]interface{}{{"index": 0, "message": map[string]interface{}{"role": "assistant", "content": "test response"}, "finish_reason": "stop"}}},
+	})
+	defer fUpstream.Server.Close()
+
+	fLogServer := testutil.NewFakeLogServer()
+	defer fLogServer.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+
+	cfg := config.ProxyConfig{
+		ListenAddr:      ":0",
+		UpstreamBaseURL: fUpstream.Server.URL,
+		LogServerURL:    fLogServer.URL(),
+		LogServerToken:  "test-token",
+		LogQueueSize:    1024,
+		CaptureMaxBytes: 0,
+	}
+
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	t.Run("AllowedRoute_V1ChatCompletions_IsEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`
+		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 200 {
+			t.Errorf("expected status 200, got %d", rr.Code)
+		}
+
+		// Verify record was enqueued
+		if mockEnqueuer.count() != 1 {
+			t.Errorf("expected 1 enqueued record for allowed route /v1/chat/completions, got %d", mockEnqueuer.count())
+		}
+	})
+
+	t.Run("DeniedRoute_Admin_IsNotEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"model":"gpt-4o"}`
+		req, _ := http.NewRequest("POST", "/admin", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 200 {
+			t.Errorf("expected status 200 (request still proxied), got %d", rr.Code)
+		}
+
+		// Verify NO record was enqueued
+		if mockEnqueuer.count() != 0 {
+			t.Errorf("expected 0 enqueued records for denied route /admin, got %d", mockEnqueuer.count())
+		}
+	})
+
+	t.Run("DeniedPrefix_ApiV1KeysRotate_IsNotEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"key_id":"test-key"}`
+		req, _ := http.NewRequest("POST", "/api/v1/keys/rotate", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 200 {
+			t.Errorf("expected status 200 (request still proxied), got %d", rr.Code)
+		}
+
+		// Verify NO record was enqueued
+		if mockEnqueuer.count() != 0 {
+			t.Errorf("expected 0 enqueued records for denied prefix /api/v1/keys/rotate, got %d", mockEnqueuer.count())
+		}
+	})
+}
+func TestProxyRouteFiltering_Streaming(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "sse",
+		StatusCode:   200,
+		SSEDataFields: []string{
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`,
+			`{"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1234,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		},
+	})
+	defer fUpstream.Server.Close()
+
+	fLogServer := testutil.NewFakeLogServer()
+	defer fLogServer.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+
+	cfg := config.ProxyConfig{
+		ListenAddr:      ":0",
+		UpstreamBaseURL: fUpstream.Server.URL,
+		LogServerURL:    fLogServer.URL(),
+		LogServerToken:  "test-token",
+		LogQueueSize:    1024,
+		CaptureMaxBytes: 0,
+	}
+
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	t.Run("AllowedRoute_V1ChatCompletions_Streaming_IsEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hello"}]}`
+		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 200 {
+			t.Errorf("expected status 200, got %d", rr.Code)
+		}
+
+		// Verify record was enqueued
+		record := mockEnqueuer.waitForRecord(t)
+		if record.Route != "/v1/chat/completions" {
+			t.Errorf("expected route /v1/chat/completions, got %s", record.Route)
+		}
+		if !record.Stream {
+			t.Error("expected stream record")
+		}
+	})
+
+	t.Run("DeniedRoute_Admin_Streaming_IsNotEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"model":"gpt-4o","stream":true}`
+		req, _ := http.NewRequest("POST", "/admin", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 200 {
+			t.Errorf("expected status 200 (request still proxied), got %d", rr.Code)
+		}
+
+		// Wait a bit to ensure any async enqueue would have happened
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify NO record was enqueued
+		if mockEnqueuer.count() != 0 {
+			t.Errorf("expected 0 enqueued records for denied route /admin, got %d", mockEnqueuer.count())
+		}
+	})
+}
+
+func TestProxyRouteFiltering_Error(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   500,
+		ResponseBody: map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "internal server error",
+				"type":    "server_error",
+				"code":    "internal_error",
+			},
+		},
+	})
+	defer fUpstream.Server.Close()
+
+	fLogServer := testutil.NewFakeLogServer()
+	defer fLogServer.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+
+	cfg := config.ProxyConfig{
+		ListenAddr:      ":0",
+		UpstreamBaseURL: fUpstream.Server.URL,
+		LogServerURL:    fLogServer.URL(),
+		LogServerToken:  "test-token",
+		LogQueueSize:    1024,
+		CaptureMaxBytes: 0,
+	}
+
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	t.Run("AllowedRoute_V1ChatCompletions_Error_IsEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`
+		req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 500 {
+			t.Errorf("expected status 500, got %d", rr.Code)
+		}
+
+		// Verify error record was enqueued
+		time.Sleep(100 * time.Millisecond)
+		if mockEnqueuer.count() != 1 {
+			t.Errorf("expected 1 enqueued record for allowed route /v1/chat/completions, got %d", mockEnqueuer.count())
+		}
+	})
+
+	t.Run("DeniedRoute_Admin_Error_IsNotEnqueued", func(t *testing.T) {
+		mockEnqueuer.mu.Lock()
+		mockEnqueuer.records = nil
+		mockEnqueuer.mu.Unlock()
+
+		reqBody := `{"model":"gpt-4o"}`
+		req, _ := http.NewRequest("POST", "/admin", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != 500 {
+			t.Errorf("expected status 500 (request still proxied), got %d", rr.Code)
+		}
+
+		// Wait a bit to ensure any async enqueue would have happened
+		time.Sleep(100 * time.Millisecond)
+
+		// Verify NO record was enqueued
+		if mockEnqueuer.count() != 0 {
+			t.Errorf("expected 0 enqueued records for denied route /admin, got %d", mockEnqueuer.count())
+		}
+	})
+}
+
+func TestProxyForwardingStillWorks_ExcludedRoute(t *testing.T) {
+	// Set up a mock backend that returns a distinctive body
+	backendResp := "admin-response"
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{
+			"message": backendResp,
+		},
+	})
+	defer fUpstream.Server.Close()
+
+	fLogServer := testutil.NewFakeLogServer()
+	defer fLogServer.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+
+	cfg := config.ProxyConfig{
+		ListenAddr:      ":0",
+		UpstreamBaseURL: fUpstream.Server.URL,
+		LogServerURL:    fLogServer.URL(),
+		LogServerToken:  "test-token",
+		LogQueueSize:    1024,
+		CaptureMaxBytes: 0,
+	}
+
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Send request to excluded route /admin
+	reqBody := `{"model":"gpt-4o"}`
+	req, _ := http.NewRequest("POST", "/admin", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	// Assert the response was received from upstream (forwarding still works)
+	if rr.Code != 200 {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Assert the upstream body was correctly forwarded
+	if !strings.Contains(rr.Body.String(), backendResp) {
+		t.Errorf("expected response body to contain %q, got %q", backendResp, rr.Body.String())
+	}
+
+	// Assert NO record was enqueued (route is excluded)
+	if mockEnqueuer.count() != 0 {
+		t.Errorf("expected 0 enqueued records for excluded route /admin, got %d", mockEnqueuer.count())
+	}
+}
+
+func TestProxyForwardingStillWorks_AllowedRoute(t *testing.T) {
+	// Set up a mock backend that returns a distinctive body
+	backendResp := "ai-response"
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{
+			"id":      "chatcmpl-test",
+			"object":  "chat.completion",
+			"created": 1234567890,
+			"model":   "gpt-4o",
+			"choices": []map[string]interface{}{
+				{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role":    "assistant",
+						"content": backendResp,
+					},
+					"finish_reason": "stop",
+				},
+			},
+		},
+	})
+	defer fUpstream.Server.Close()
+
+	fLogServer := testutil.NewFakeLogServer()
+	defer fLogServer.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+
+	cfg := config.ProxyConfig{
+		ListenAddr:      ":0",
+		UpstreamBaseURL: fUpstream.Server.URL,
+		LogServerURL:    fLogServer.URL(),
+		LogServerToken:  "test-token",
+		LogQueueSize:    1024,
+		CaptureMaxBytes: 0,
+	}
+
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Send request to allowed route /v1/chat/completions
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	// Assert the response was received from upstream (forwarding still works)
+	if rr.Code != 200 {
+		t.Errorf("expected status 200, got %d", rr.Code)
+	}
+
+	// Assert the upstream body was correctly forwarded
+	if !strings.Contains(rr.Body.String(), backendResp) {
+		t.Errorf("expected response body to contain %q, got %q", backendResp, rr.Body.String())
+	}
+
+	// Assert ONE record was enqueued (route is allowed)
+	if mockEnqueuer.count() != 1 {
+		t.Errorf("expected 1 enqueued record for allowed route /v1/chat/completions, got %d", mockEnqueuer.count())
+	}
+}
