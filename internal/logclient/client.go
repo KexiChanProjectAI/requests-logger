@@ -17,22 +17,31 @@ import (
 
 // Client is an asynchronous, fail-open log client that buffers records
 // in a bounded queue and POSTs them to the log server in the background.
+// Multiple worker goroutines process records concurrently for better throughput.
 type Client struct {
-	cfg     config.ProxyConfig
-	ch      chan *logschema.Record
-	wg      sync.WaitGroup
-	dropped int64
-	stopCh  chan struct{}
-	client  *http.Client
+	cfg         config.ProxyConfig
+	ch          chan *logschema.Record
+	wg          sync.WaitGroup
+	dropped     int64
+	sent        int64
+	retries     int64
+	stopCh      chan struct{}
+	client      *http.Client
+	workerCount int
 }
 
 // NewClient creates a new log client with a bounded queue of the configured size.
 func NewClient(cfg config.ProxyConfig) *Client {
+	workerCount := cfg.LogClientWorkers
+	if workerCount <= 0 {
+		workerCount = 4
+	}
 	return &Client{
-		cfg:    cfg,
-		ch:     make(chan *logschema.Record, cfg.LogQueueSize),
-		stopCh: make(chan struct{}),
-		client: &http.Client{Timeout: 10 * time.Second},
+		cfg:         cfg,
+		ch:          make(chan *logschema.Record, cfg.LogQueueSize),
+		stopCh:      make(chan struct{}),
+		client:      &http.Client{Timeout: 10 * time.Second},
+		workerCount: workerCount,
 	}
 }
 
@@ -53,14 +62,31 @@ func (c *Client) DroppedCount() int64 {
 	return atomic.LoadInt64(&c.dropped)
 }
 
-// Start launches the background worker goroutine that POSTs records to the log server.
-func (c *Client) Start() {
-	c.wg.Add(1)
-	go c.worker()
+// SentCount returns the number of records successfully sent to the log server.
+func (c *Client) SentCount() int64 {
+	return atomic.LoadInt64(&c.sent)
 }
 
-// Stop gracefully shuts down the client. It closes the queue channel and waits
-// for the worker to drain any remaining records before returning.
+// RetryCount returns the number of retries performed across all workers.
+func (c *Client) RetryCount() int64 {
+	return atomic.LoadInt64(&c.retries)
+}
+
+// QueueLen returns the approximate current number of records in the queue.
+func (c *Client) QueueLen() int {
+	return len(c.ch)
+}
+
+// Start launches the background worker goroutines that POSTs records to the log server.
+func (c *Client) Start() {
+	for i := 0; i < c.workerCount; i++ {
+		c.wg.Add(1)
+		go c.worker()
+	}
+}
+
+// Stop gracefully shuts down the client. It closes the stop channel and waits
+// for all workers to drain any remaining records before returning.
 func (c *Client) Stop() {
 	close(c.stopCh)
 	close(c.ch)
@@ -92,43 +118,44 @@ func (c *Client) sendWithRetry(record *logschema.Record) {
 		return
 	}
 
-	const maxRetries = 3
+	maxRetries := c.cfg.LogClientMaxRetries
+	if maxRetries <= 0 {
+		maxRetries = 2
+	}
 	backoff := 100 * time.Millisecond
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
-			jitter := time.Duration(time.Now().UnixNano()%int64(backoff / 2))
+			jitter := time.Duration(time.Now().UnixNano()%int64(backoff/2))
 			sleep := backoff - (backoff / 2) + jitter
 			time.Sleep(sleep)
 			backoff *= 2
 			if backoff > 5*time.Second {
 				backoff = 5 * time.Second
 			}
+			atomic.AddInt64(&c.retries, 1)
 		}
 
 		err := c.send(record)
 		if err == nil {
+			atomic.AddInt64(&c.sent, 1)
 			return
 		}
 		lastErr = err
 
-		// Check if error is permanent (4xx) - don't retry
 		if isPermanentError(err) {
 			log.Printf("logclient: permanent error sending record: %v", err)
 			return
 		}
 
-		// Transient error (5xx, network) - retry
 		log.Printf("logclient: transient error sending record (attempt %d/%d): %v", attempt+1, maxRetries+1, err)
 	}
 
-	// All retries exhausted, fail-open: log error and continue
 	log.Printf("logclient: failed to send record after %d retries: %v", maxRetries+1, lastErr)
 }
 
 func (c *Client) send(record *logschema.Record) error {
-	// Ensure all RawMessage fields contain valid JSON before marshaling
 	record.SanitizeRawMessages()
 
 	data, err := json.Marshal(record)
@@ -150,7 +177,6 @@ func (c *Client) send(record *logschema.Record) error {
 	}
 	defer resp.Body.Close()
 
-	// Read body to ensure connection is reused
 	io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {

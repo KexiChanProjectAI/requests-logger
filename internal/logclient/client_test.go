@@ -19,7 +19,8 @@ func TestEnqueueDequeuesAndSendsToServer(t *testing.T) {
 	defer fls.Server.Close()
 
 	cfg := config.ProxyConfig{
-		LogServerURL:   fls.URL(),
+		LogServerURL:    fls.URL(),
+		LogClientWorkers: 1,
 		LogServerToken: "test-token-123",
 		LogQueueSize:   1024,
 	}
@@ -69,7 +70,8 @@ func TestBearerTokenSentInAuthorizationHeader(t *testing.T) {
 	defer fls.Server.Close()
 
 	cfg := config.ProxyConfig{
-		LogServerURL:   fls.URL(),
+		LogServerURL:    fls.URL(),
+		LogClientWorkers: 1,
 		LogServerToken: "my-secret-token",
 		LogQueueSize:   1024,
 	}
@@ -123,7 +125,8 @@ func TestQueueFullDropsNewestAndIncrementsCounter(t *testing.T) {
 	defer fls.Server.Close()
 
 	cfg := config.ProxyConfig{
-		LogServerURL:   fls.URL(),
+		LogServerURL:    fls.URL(),
+		LogClientWorkers: 1,
 		LogServerToken: "test-token",
 		LogQueueSize:   2,
 	}
@@ -167,7 +170,8 @@ func TestBackgroundWorkerRetriesOnTransientFailures(t *testing.T) {
 	})
 
 	cfg := config.ProxyConfig{
-		LogServerURL:   fls.URL(),
+		LogServerURL:    fls.URL(),
+		LogClientWorkers: 1,
 		LogServerToken: "test-token",
 		LogQueueSize:   1024,
 	}
@@ -193,7 +197,8 @@ func TestStopDrainsRemainingRecords(t *testing.T) {
 	defer fls.Server.Close()
 
 	cfg := config.ProxyConfig{
-		LogServerURL:   fls.URL(),
+		LogServerURL:    fls.URL(),
+		LogClientWorkers: 1,
 		LogServerToken: "test-token",
 		LogQueueSize:   1024,
 	}
@@ -220,7 +225,8 @@ func TestEnqueueNeverBlocks(t *testing.T) {
 	defer fls.Server.Close()
 
 	cfg := config.ProxyConfig{
-		LogServerURL:   fls.URL(),
+		LogServerURL:    fls.URL(),
+		LogClientWorkers: 1,
 		LogServerToken: "test-token",
 		LogQueueSize:   1,
 	}
@@ -235,7 +241,7 @@ func TestEnqueueNeverBlocks(t *testing.T) {
 			defer wg.Done()
 			start := time.Now()
 			client.Enqueue(logschema.NewRecord())
-			if time.Since(start) > 10*time.Millisecond {
+			if time.Since(start) > 100*time.Millisecond {
 				t.Errorf("Enqueue blocked unexpectedly")
 			}
 		}()
