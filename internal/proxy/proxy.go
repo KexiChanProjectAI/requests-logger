@@ -90,6 +90,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	setForwardingHeaders(upstreamReq, r)
 
+	// When SNI is configured, override the Host header to match
+	// so the upstream server sees a consistent hostname.
+	if h.cfg.UpstreamTLSSNI != "" {
+		upstreamReq.Host = h.cfg.UpstreamTLSSNI
+	}
+
 	resp, err := h.upstreamClient.Do(upstreamReq)
 	if err != nil {
 		h.enqueueError(r, startTime, "upstream request failed: "+err.Error(), logschema.TerminalStatusUpstreamError, 0, reqBody, r.Header)
