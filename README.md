@@ -34,7 +34,9 @@ Client  -->  [Proxy]  -->  OpenAI API
 | LOG_SERVER_URL | Log server URL (e.g., `http://localhost:8081`) | (empty) |
 | LOG_SERVER_TOKEN | Bearer token shared with log server for authentication | (empty) |
 | LOG_QUEUE_SIZE | Size of the async log queue | 1024 |
-| CAPTURE_MAX_BYTES | Max bytes to capture from request/response bodies (0 = unlimited) | 0 |
+QW|| CAPTURE_MAX_BYTES | Max bytes to capture from request/response bodies (0 = unlimited) | 0 |
+BN|| UPSTREAM_TLS_INSECURE | Skip upstream TLS certificate verification | false |
+BN|| UPSTREAM_TLS_SNI | Override TLS ServerName (SNI) for upstream HTTPS | (empty) |
 
 ### Log Server Configuration
 

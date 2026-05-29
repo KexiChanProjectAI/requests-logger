@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"crypto/tls"
+
 	"github.com/google/uuid"
 	"github.com/user/openai-go-proxy-logger/internal/config"
 	"github.com/user/openai-go-proxy-logger/internal/logschema"
@@ -20,16 +22,37 @@ type LogEnqueuer interface {
 }
 
 type Handler struct {
-	cfg         config.ProxyConfig
-	logEnqueuer LogEnqueuer
-	upstreamURL string
+	cfg            config.ProxyConfig
+	logEnqueuer    LogEnqueuer
+	upstreamURL    string
+	upstreamClient *http.Client
 }
 
 func NewHandler(cfg config.ProxyConfig, logEnqueuer LogEnqueuer) http.Handler {
+	transport := &http.Transport{
+		MaxIdleConns:        cfg.UpstreamMaxIdleConns,
+		IdleConnTimeout:     cfg.UpstreamIdleConnTimeout,
+		DisableCompression:  false,
+	}
+	if cfg.UpstreamTLSInsecure || cfg.UpstreamTLSSNI != "" {
+		tlsConfig := &tls.Config{}
+		if cfg.UpstreamTLSInsecure {
+			tlsConfig.InsecureSkipVerify = true
+		}
+		if cfg.UpstreamTLSSNI != "" {
+			tlsConfig.ServerName = cfg.UpstreamTLSSNI
+		}
+		transport.TLSClientConfig = tlsConfig
+	}
+	upstreamClient := &http.Client{
+		Transport: transport,
+		Timeout:   cfg.UpstreamTimeout,
+	}
 	return &Handler{
-		cfg:         cfg,
-		logEnqueuer: logEnqueuer,
-		upstreamURL: cfg.UpstreamBaseURL,
+		cfg:            cfg,
+		logEnqueuer:    logEnqueuer,
+		upstreamURL:    cfg.UpstreamBaseURL,
+		upstreamClient: upstreamClient,
 	}
 }
 
@@ -67,8 +90,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	setForwardingHeaders(upstreamReq, r)
 
-	client := &http.Client{}
-	resp, err := client.Do(upstreamReq)
+	resp, err := h.upstreamClient.Do(upstreamReq)
 	if err != nil {
 		h.enqueueError(r, startTime, "upstream request failed: "+err.Error(), logschema.TerminalStatusUpstreamError, 0, reqBody, r.Header)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
