@@ -115,7 +115,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.applyCaptureMax(record)
 	}
 
-	if h.logEnqueuer != nil {
+	if h.logEnqueuer != nil && shouldLogPath(r.URL.Path) {
 		h.logEnqueuer.Enqueue(record)
 	}
 
@@ -244,7 +244,9 @@ outerLoop:
 	if h.cfg.CaptureMaxBytes > 0 {
 		h.applyCaptureMax(record)
 	}
-	h.enqueueRecord(record)
+	if shouldLogPath(r.URL.Path) {
+		h.enqueueRecord(record)
+	}
 }
 
 func (h *Handler) newRecord(r *http.Request, logID, requestID string, startTime time.Time, terminalStatus logschema.TerminalStatus, upstreamStatus int, reqBody []byte, respHeaders http.Header, respBody []byte, stream bool, upstreamURL string) *logschema.Record {
@@ -310,7 +312,7 @@ func (h *Handler) enqueueError(r *http.Request, startTime time.Time, errMsg stri
 	record.Stream = false
 
 	go func() {
-		if h.logEnqueuer != nil {
+		if h.logEnqueuer != nil && shouldLogPath(r.URL.Path) {
 			h.logEnqueuer.Enqueue(record)
 		}
 	}()
