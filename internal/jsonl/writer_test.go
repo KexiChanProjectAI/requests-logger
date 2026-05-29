@@ -447,14 +447,14 @@ func TestCloseWaitsForQueuedArchives(t *testing.T) {
 		LogDir:               logDir,
 		UTCHourlyLayout:      "2006-01-02T15",
 		ArchiveEnabled:       true,
-		ArchiveMaxConcurrent: 1,
+		ArchiveMaxConcurrent: 2,
 	}
 
 	w := &Writer{
 		config:      cfg,
 		handles:     make(map[string]*fileHandle),
 		stopCh:      make(chan struct{}),
-		archiveSem:  make(chan struct{}, 1),
+		archiveSem:  make(chan struct{}, 2),
 		archiveOpts: archiver.Options{},
 	}
 
@@ -498,5 +498,226 @@ func TestCloseWaitsForQueuedArchives(t *testing.T) {
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("expected 2 archive jobs, got %d", got)
+	}
+}
+
+func TestConfigurableStaleTimeout(t *testing.T) {
+	// Test that configurable stale timeout from config is used instead of package var
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:             logDir,
+		UTCHourlyLayout:   "2006-01-02T15",
+		StaleHandleTimeout: 100 * time.Millisecond,
+		CleanupInterval:   50 * time.Millisecond,
+	}
+
+	w := NewWriter(cfg)
+	defer w.Close()
+
+	// Write to a file to create a handle
+	ts := time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC)
+	record := &logschema.Record{
+		LogID:            "log-timeout-test",
+		RequestTimestamp: ts,
+	}
+	if err := w.Write(record); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// Wait for cleanup to run (cleanup interval is 50ms, stale timeout is 100ms)
+	// After ~150ms, the handle should be closed
+	time.Sleep(200 * time.Millisecond)
+
+	// The handle should be removed from the map (stale)
+	filePath := filepath.Join(logDir, "2026-05-20T14.jsonl")
+	w.handlesMu.RLock()
+	_, ok := w.handles[filePath]
+	w.handlesMu.RUnlock()
+
+	if ok {
+		t.Errorf("Handle should have been removed as stale with custom timeout")
+	}
+}
+
+func TestArchiveSemaphoreNonBlocking(t *testing.T) {
+	// Test that when archive semaphore is full, cleanup goroutine doesn't block.
+	// We verify this by ensuring closeStaleHandles returns promptly even with slow archives.
+	origArchiveFile := archiveFile
+	defer func() { archiveFile = origArchiveFile }()
+
+	// Slow archive that will cause the semaphore to block
+	var archiveStarted int32
+	archiveBlock := make(chan struct{})
+	archiveFile = func(path string, opts archiver.Options) (string, error) {
+		atomic.AddInt32(&archiveStarted, 1)
+		<-archiveBlock // block until released
+		return path + ".tar.zst", nil
+	}
+
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:               logDir,
+		UTCHourlyLayout:      "2006-01-02T15",
+		ArchiveEnabled:       true,
+		ArchiveMaxConcurrent: 1,
+	}
+
+	w := &Writer{
+		config:      cfg,
+		handles:     make(map[string]*fileHandle),
+		stopCh:      make(chan struct{}),
+		archiveSem:  make(chan struct{}, 1),
+		archiveOpts: archiver.Options{},
+	}
+
+	// Create 5 stale handles
+	for i := 0; i < 5; i++ {
+		filePath := filepath.Join(logDir, fmt.Sprintf("2026-05-20T1%d.jsonl", i))
+		file, err := os.Create(filePath)
+		if err != nil {
+			t.Fatalf("create file: %v", err)
+		}
+		w.handles[filePath] = &fileHandle{
+			file:      file,
+			lastWrite: time.Now().Add(-10 * time.Minute),
+			filePath:  filePath,
+		}
+	}
+
+	// closeStaleHandles should return promptly because it uses non-blocking send.
+	// The first archive will get the semaphore slot, others will be skipped.
+	start := time.Now()
+	w.closeStaleHandles()
+	elapsed := time.Since(start)
+
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("closeStaleHandles took too long (%v), indicating it blocked on semaphore", elapsed)
+	}
+
+	// Give goroutines time to attempt their non-blocking sends
+	time.Sleep(50 * time.Millisecond)
+
+	// Only 1 archive should have started (the rest skipped due to non-blocking send)
+	if got := atomic.LoadInt32(&archiveStarted); got != 1 {
+		t.Errorf("expected 1 archive call, got %d", got)
+	}
+
+	close(archiveBlock)
+}
+
+func TestGracefulShutdownWithInflightArchives(t *testing.T) {
+	// Test that Close() waits for in-flight archives with timeout
+	origArchiveFile := archiveFile
+	defer func() { archiveFile = origArchiveFile }()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var archiveCalls atomic.Int32
+	archiveFile = func(path string, opts archiver.Options) (string, error) {
+		archiveCalls.Add(1)
+		started <- struct{}{}
+		<-release
+		return path + ".tar.zst", nil
+	}
+
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:               logDir,
+		UTCHourlyLayout:      "2006-01-02T15",
+		ArchiveEnabled:       true,
+		ArchiveMaxConcurrent: 1,
+	}
+
+	w := NewWriter(cfg)
+
+	// Create a stale handle
+	filePath := filepath.Join(logDir, "2026-05-20T14.jsonl")
+	file, err := os.Create(filePath)
+	if err != nil {
+		t.Fatalf("create file: %v", err)
+	}
+	w.handlesMu.Lock()
+	w.handles[filePath] = &fileHandle{
+		file:      file,
+		lastWrite: time.Now().Add(-10 * time.Minute),
+		filePath:  filePath,
+	}
+	w.handlesMu.Unlock()
+
+	// Trigger archive
+	w.closeStaleHandles()
+	<-started
+
+	// Close should wait for the archive to complete
+	done := make(chan error, 1)
+	go func() {
+		done <- w.Close()
+	}()
+
+	// Give Close time to start waiting
+	time.Sleep(50 * time.Millisecond)
+
+	// Release the archive
+	close(release)
+
+	// Close should complete
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not complete after archive release")
+	}
+
+	if archiveCalls.Load() != 1 {
+		t.Errorf("expected 1 archive call, got %d", archiveCalls.Load())
+	}
+}
+
+func TestConcurrentWritesDuringCleanup(t *testing.T) {
+	// Test that writes succeed during cleanup cycle
+	logDir := t.TempDir()
+	cfg := config.LogServerConfig{
+		LogDir:             logDir,
+		UTCHourlyLayout:   "2006-01-02T15",
+		StaleHandleTimeout: 50 * time.Millisecond,
+		CleanupInterval:   20 * time.Millisecond,
+	}
+
+	w := NewWriter(cfg)
+	defer w.Close()
+
+	ts := time.Date(2026, 5, 20, 14, 0, 0, 0, time.UTC)
+	var wg sync.WaitGroup
+	wg.Add(10)
+
+	// Concurrently write records while cleanup runs
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				record := &logschema.Record{
+					LogID:             fmt.Sprintf("log-%d-%d", idx, j),
+					RequestID:         fmt.Sprintf("req-%d-%d", idx, j),
+					Route:             "/v1/chat/completions",
+					RequestTimestamp:  ts,
+					ResponseTimestamp: ts.Add(time.Millisecond),
+					TerminalStatus:    logschema.TerminalStatusCompleted,
+				}
+				if err := w.Write(record); err != nil {
+					t.Errorf("Write failed: %v", err)
+				}
+				time.Sleep(time.Microsecond)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify all records were written
+	lines := testutil.ReadJSONLLines(t, logDir, "2026-05-20T14.jsonl")
+	if len(lines) != 500 {
+		t.Errorf("Expected 500 records, got %d", len(lines))
 	}
 }

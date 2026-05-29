@@ -14,6 +14,8 @@ import (
 	"github.com/user/openai-go-proxy-logger/internal/logschema"
 )
 
+// Package-level defaults for stale handle timeout and cleanup interval.
+// These can be overridden by config values, but tests may set these directly.
 var (
 	staleTimeout    = 5 * time.Minute
 	cleanupInterval = 1 * time.Minute
@@ -30,20 +32,28 @@ type fileHandle struct {
 
 // Writer writes log records to hourly JSONL files.
 type Writer struct {
-	config        config.LogServerConfig
-	handles       map[string]*fileHandle
-	handlesMu      sync.Mutex
-	stopCh        chan struct{}
-	archiveSem    chan struct{}
-	archiveOpts   archiver.Options
-	cleanupWG     sync.WaitGroup
-	archiveWG     sync.WaitGroup
+	config      config.LogServerConfig
+	handles     map[string]*fileHandle
+	handlesMu   sync.RWMutex
+	stopCh      chan struct{}
+	archiveSem  chan struct{}
+	archiveOpts archiver.Options
+	cleanupWG   sync.WaitGroup
+	archiveWG   sync.WaitGroup
 }
 
 // NewWriter creates a new JSONL writer that writes to files in LogDir.
 // Each hourly file is named <UTC-hour>.jsonl using the UTCHourlyLayout format.
-// Stale file handles (not written to for 5 minutes) are automatically closed.
+// Stale file handles (not written to for StaleHandleTimeout) are automatically closed.
 func NewWriter(cfg config.LogServerConfig) *Writer {
+	// Apply defaults from package-level vars if not explicitly set in config.
+	if cfg.StaleHandleTimeout <= 0 {
+		cfg.StaleHandleTimeout = staleTimeout
+	}
+	if cfg.CleanupInterval <= 0 {
+		cfg.CleanupInterval = cleanupInterval
+	}
+
 	w := &Writer{
 		config:  cfg,
 		handles: make(map[string]*fileHandle),
@@ -64,7 +74,7 @@ func NewWriter(cfg config.LogServerConfig) *Writer {
 // cleanupLoop periodically closes stale file handles.
 func (w *Writer) cleanupLoop() {
 	defer w.cleanupWG.Done()
-	ticker := time.NewTicker(cleanupInterval)
+	ticker := time.NewTicker(w.config.CleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -77,43 +87,69 @@ func (w *Writer) cleanupLoop() {
 }
 
 // closeStaleHandles closes file handles that haven't been written to in staleTimeout.
+// Lock is released before closing files to avoid blocking new writes during I/O.
 func (w *Writer) closeStaleHandles() {
-	var archivePaths []string
-
 	w.handlesMu.Lock()
 	now := time.Now()
+
+	// Build list of handles to close and archive under lock
+	type staleHandle struct {
+		hour     string
+		fh       *fileHandle
+		filePath string
+	}
+	var stale []staleHandle
 	for hour, fh := range w.handles {
 		fh.mu.Lock()
-		if now.Sub(fh.lastWrite) > staleTimeout {
-			filePath := fh.filePath
-			fh.file.Close()
-			delete(w.handles, hour)
-			fh.mu.Unlock()
-
-			if w.config.ArchiveEnabled {
-				archivePaths = append(archivePaths, filePath)
-			}
-		} else {
-			fh.mu.Unlock()
+		if now.Sub(fh.lastWrite) > w.config.StaleHandleTimeout {
+			stale = append(stale, staleHandle{hour: hour, fh: fh, filePath: fh.filePath})
 		}
+		fh.mu.Unlock()
+	}
+
+	// Remove from map while still holding lock
+	for _, s := range stale {
+		delete(w.handles, s.hour)
 	}
 	w.handlesMu.Unlock()
+
+	// Close files and trigger archives OUTSIDE the lock
+	var archivePaths []string
+	for _, s := range stale {
+		s.fh.mu.Lock()
+		s.fh.file.Close()
+		s.fh.mu.Unlock()
+		if w.config.ArchiveEnabled {
+			archivePaths = append(archivePaths, s.filePath)
+		}
+	}
 
 	for _, path := range archivePaths {
 		w.startArchive(path)
 	}
 }
 
+// startArchive starts archiving a file in a background goroutine.
+// If the archive semaphore is full (non-blocking), it skips archiving and logs a warning.
 func (w *Writer) startArchive(path string) {
 	w.archiveWG.Add(1)
 	go func() {
 		defer w.archiveWG.Done()
+
+		// Non-blocking acquisition of archive semaphore slot.
+		// If the semaphore is full, skip archiving rather than blocking the cleanup goroutine.
 		if w.archiveSem != nil {
-			w.archiveSem <- struct{}{}
-			defer func() {
-				<-w.archiveSem
-			}()
+			select {
+			case w.archiveSem <- struct{}{}:
+				// acquired slot
+			default:
+				// semaphore full, skip archiving
+				log.Printf("archive limit reached, skipping %s", path)
+				return
+			}
+			defer func() { <-w.archiveSem }()
 		}
+
 		if _, err := archiveFile(path, w.archiveOpts); err != nil {
 			log.Printf("Failed to archive %s: %v", path, err)
 		}
@@ -132,6 +168,7 @@ func (w *Writer) filePathForTime(t time.Time) string {
 // Write writes a log record to the appropriate hourly JSONL file.
 // The file is determined by the record's RequestTimestamp in UTC.
 // If the UTC hour has changed since the last write, a new file handle is created.
+// JSON marshaling is performed outside the per-file lock to reduce lock hold time.
 func (w *Writer) Write(record *logschema.Record) error {
 	if record == nil {
 		return fmt.Errorf("record is nil")
@@ -146,17 +183,17 @@ func (w *Writer) Write(record *logschema.Record) error {
 		return fmt.Errorf("failed to get file handle for %s", filePath)
 	}
 
+	// Marshal the record to JSON BEFORE acquiring lock to reduce lock hold time
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("failed to marshal record: %w", err)
+	}
+
 	// Serialize writes to this file
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 
 	fh.lastWrite = time.Now()
-
-	// Marshal the record to JSON
-	data, err := json.Marshal(record)
-	if err != nil {
-		return fmt.Errorf("failed to marshal record: %w", err)
-	}
 
 	// Write JSON line with newline
 	_, err = fh.file.Write(append(data, '\n'))
@@ -168,12 +205,22 @@ func (w *Writer) Write(record *logschema.Record) error {
 }
 
 // getHandle returns the file handle for the given path, creating one if necessary.
+// Uses RWMutex for better concurrent read performance.
 func (w *Writer) getHandle(filePath string) *fileHandle {
+	// Fast path: use read lock for existing handles
+	w.handlesMu.RLock()
+	fh, ok := w.handles[filePath]
+	w.handlesMu.RUnlock()
+	if ok {
+		return fh
+	}
+
+	// Slow path: acquire write lock to create new handle
 	w.handlesMu.Lock()
 	defer w.handlesMu.Unlock()
 
-	// Check if we already have a handle
-	if fh, ok := w.handles[filePath]; ok {
+	// Double-check after acquiring write lock
+	if fh, ok = w.handles[filePath]; ok {
 		return fh
 	}
 
@@ -183,7 +230,7 @@ func (w *Writer) getHandle(filePath string) *fileHandle {
 		return nil
 	}
 
-	fh := &fileHandle{
+	fh = &fileHandle{
 		file:      file,
 		lastWrite: time.Now(),
 		filePath:  filePath,
@@ -193,6 +240,7 @@ func (w *Writer) getHandle(filePath string) *fileHandle {
 }
 
 // Close closes all open file handles and stops the cleanup goroutine.
+// It waits for in-flight archives with a timeout to prevent indefinite hang.
 func (w *Writer) Close() error {
 	// Signal the cleanup goroutine to stop
 	close(w.stopCh)
@@ -209,7 +257,20 @@ func (w *Writer) Close() error {
 	w.handles = make(map[string]*fileHandle)
 	w.handlesMu.Unlock()
 
-	w.archiveWG.Wait()
+	// Wait for archive goroutines to complete with timeout.
+	// This prevents Close from hanging indefinitely if an archive gets stuck.
+	archiveDone := make(chan struct{})
+	go func() {
+		w.archiveWG.Wait()
+		close(archiveDone)
+	}()
+
+	select {
+	case <-archiveDone:
+		// all archives completed
+	case <-time.After(5 * time.Second):
+		log.Printf("archive wait timeout, proceeding with close")
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing files: %v", errs)
