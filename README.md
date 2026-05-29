@@ -43,11 +43,13 @@ Client  -->  [Proxy]  -->  OpenAI API
 | LISTEN_ADDR | Address the log server listens on (e.g., `:8081`) | (empty) |
 | LOG_SERVER_TOKEN | Bearer token for authenticating proxy requests | (empty) |
 | LOG_DIR | Directory for JSONL log files | (empty, current directory) |
-| UTC_HOURLY_LAYOUT | Go time layout for hourly file naming in UTC | 2006-01-02T00:00:00Z |
+| UTC_HOURLY_LAYOUT | Go time layout for hourly file naming in UTC | 2006/01/02/15 |
 | ARCHIVE_ENABLED | Compress stale JSONL files to `.tar.zst` | true |
 | ARCHIVE_ZSTD_WINDOW_MB | ZSTD search window in MiB, power of two, capped at 512 | 512 |
 | ARCHIVE_ZSTD_CONCURRENCY | ZSTD encoder concurrency per archive job | 8 |
 | ARCHIVE_MAX_CONCURRENT | Maximum archive jobs running simultaneously | 1 |
+| STALE_HANDLE_TIMEOUT | How long a file handle can be idle before closing | 5m |
+| CLEANUP_INTERVAL | How often to run stale handle cleanup | 1m |
 
 ## Quickstart
 
@@ -103,6 +105,24 @@ Each line in a JSONL file is a valid JSON object with the following fields:
 | stream | bool | Whether this was a streaming response |
 | truncation_info | object | Present only when body was truncated (truncated, original_bytes, capture_max_bytes) |
 
-## Security Note
-
 The LOG_SERVER_TOKEN must be identical on both the proxy and the log server. This token is sent as a Bearer token in the Authorization header when the proxy posts log records to the log server. Choose a strong, random token in production.
+
+## Migration Notes
+
+### v0.2.0 - Archive and Stale Handle Cleanup
+
+The log server now automatically archives stale JSONL files and manages file handle lifecycles:
+
+- `ARCHIVE_ENABLED`: Set to `true` to compress stale JSONL files to `.tar.zst` using zstd
+
+- `ARCHIVE_ZSTD_WINDOW_MB`: ZSTD compression window size (default 512 MiB, capped at 512)
+
+- `ARCHIVE_ZSTD_CONCURRENCY`: Concurrent encoders per archive job (default 8)
+
+- `ARCHIVE_MAX_CONCURRENT`: Max simultaneous archive jobs (default 1)
+
+- `STALE_HANDLE_TIMEOUT`: How long a file handle can be idle before closing (default 5m)
+
+- `CLEANUP_INTERVAL`: How often stale handle cleanup runs (default 1m)
+
+The `UTC_HOURLY_LAYOUT` default changed from `2006-01-02T00:00:00Z` to `2006/01/02/15` to produce more directory-friendly file paths.
