@@ -25,6 +25,8 @@ type ProxyConfig struct {
 	ProfileListenAddr       string
 	UpstreamTLSInsecure     bool
 	UpstreamTLSSNI          string
+	ProxyTLSCertFile        string // TLS cert file path for proxy HTTPS listener (empty = HTTP)
+	ProxyTLSKeyFile         string // TLS key file path for proxy HTTPS listener
 }
 
 // LogServerConfig holds configuration for the log server.
@@ -83,6 +85,8 @@ func LoadProxyConfig() ProxyConfig {
 		ProfileListenAddr:       getEnvOrDefault("PROFILE_LISTEN_ADDR", ":6060"),
 		UpstreamTLSInsecure:     getEnvBoolOrDefault("UPSTREAM_TLS_INSECURE", false),
 		UpstreamTLSSNI:          os.Getenv("UPSTREAM_TLS_SNI"),
+		ProxyTLSCertFile:        os.Getenv("PROXY_TLS_CERT_FILE"),
+		ProxyTLSKeyFile:         os.Getenv("PROXY_TLS_KEY_FILE"),
 	}
 }
 
