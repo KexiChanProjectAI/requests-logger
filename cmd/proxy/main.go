@@ -23,13 +23,15 @@ func main() {
 	logClient.Start()
 	defer logClient.Stop()
 
+	// Set Gin to release mode to suppress debug warnings
+	gin.SetMode(gin.ReleaseMode)
 	// Create Gin engine with recovery middleware
 	router := gin.New()
 	router.Use(gin.Recovery())
 
 	// Mount the proxy handler — all paths and methods go to upstream
+	// Note: /*path also matches /, so no separate / route is needed.
 	router.Any("/*path", gin.WrapH(proxy.NewHandler(cfg, logClient)))
-	router.Any("/", gin.WrapH(proxy.NewHandler(cfg, logClient)))
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
