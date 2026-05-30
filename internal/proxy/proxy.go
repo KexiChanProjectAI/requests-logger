@@ -20,12 +20,12 @@ import (
 type LogEnqueuer interface {
 	Enqueue(record *logschema.Record)
 }
-
 type Handler struct {
 	cfg            config.ProxyConfig
 	logEnqueuer    LogEnqueuer
 	upstreamURL    string
 	upstreamClient *http.Client
+	trustedProxies []*net.IPNet // CIDRs of trusted reverse proxies
 }
 
 func NewHandler(cfg config.ProxyConfig, logEnqueuer LogEnqueuer) http.Handler {
@@ -53,9 +53,10 @@ func NewHandler(cfg config.ProxyConfig, logEnqueuer LogEnqueuer) http.Handler {
 		logEnqueuer:    logEnqueuer,
 		upstreamURL:    cfg.UpstreamBaseURL,
 		upstreamClient: upstreamClient,
+		trustedProxies: cfg.TrustedProxyCIDRs,
 	}
-}
 
+}
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	startTime := time.Now()
 
@@ -88,7 +89,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	setForwardingHeaders(upstreamReq, r)
+	h.setForwardingHeaders(upstreamReq, r)
 
 	// When SNI is configured, override the Host header to match
 	// so the upstream server sees a consistent hostname.
@@ -390,20 +391,36 @@ func isLocalhost(ip string) bool {
 	return false
 }
 
-func setForwardingHeaders(outreq *http.Request, r *http.Request) {
+func (h *Handler) setForwardingHeaders(outreq *http.Request, r *http.Request) {
 	clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		clientIP = r.RemoteAddr
 	}
 
-	if isLocalhost(clientIP) {
-		if existingXFF := r.Header.Get("X-Forwarded-For"); existingXFF != "" {
-			outreq.Header.Set("X-Forwarded-For", existingXFF+", "+clientIP)
-		} else {
-			outreq.Header.Set("X-Forwarded-For", clientIP)
+	if h.isTrustedProxy(clientIP) {
+		switch h.cfg.TrustedProxyXFFMode {
+		case "forward":
+			// Forward mode — pass existing X-Forwarded-For through as-is,
+			// do not modify or append. The upstream receives exactly what
+			// the trusted reverse proxy sent.
+			if existingXFF := r.Header.Get("X-Forwarded-For"); existingXFF != "" {
+				outreq.Header.Set("X-Forwarded-For", existingXFF)
+			} else {
+				outreq.Header.Set("X-Forwarded-For", clientIP)
+			}
+		default:
+			// Append mode (default) — preserve existing X-Forwarded-For chain
+			// and append the direct client IP of this hop.
+			if existingXFF := r.Header.Get("X-Forwarded-For"); existingXFF != "" {
+				outreq.Header.Set("X-Forwarded-For", existingXFF+", "+clientIP)
+			} else {
+				outreq.Header.Set("X-Forwarded-For", clientIP)
+			}
 		}
 	} else {
-		outreq.Header.Set("X-Forwarded-For", clientIP)
+		// Non-trusted client — strip any existing X-Forwarded-For header entirely.
+		// This prevents clients from spoofing their IP through XFF.
+		outreq.Header.Del("X-Forwarded-For")
 	}
 
 	outreq.Header.Set("X-Forwarded-Host", r.Host)
@@ -415,4 +432,23 @@ func setForwardingHeaders(outreq *http.Request, r *http.Request) {
 		proto = "https"
 	}
 	outreq.Header.Set("X-Forwarded-Proto", proto)
+}
+
+// isTrustedProxy returns true if the client IP is a trusted reverse proxy.
+// localhost is always considered trusted. Additional CIDRs are loaded
+// from the TRUSTED_PROXY_CIDRS configuration.
+func (h *Handler) isTrustedProxy(ip string) bool {
+	if isLocalhost(ip) {
+		return true
+	}
+	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return false
+	}
+	for _, cidr := range h.trustedProxies {
+		if cidr.Contains(parsedIP) {
+			return true
+		}
+	}
+	return false
 }

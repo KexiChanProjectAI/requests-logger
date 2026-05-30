@@ -1155,3 +1155,219 @@ func TestProxyForwardingStillWorks_AllowedRoute(t *testing.T) {
 		t.Errorf("expected 1 enqueued record for allowed route /v1/chat/completions, got %d", mockEnqueuer.count())
 	}
 }
+
+
+func TestXFFHeaderFromTrustedProxyCIDR(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	cfg := config.ProxyConfig{
+		UpstreamBaseURL:  fUpstream.Server.URL,
+	}
+	cfg.TrustedProxyCIDRs = config.ParseCIDRList("10.0.0.0/8")
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Simulate request from a trusted proxy (10.x.x.x) with existing XFF
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50, 198.51.100.10")
+	req.RemoteAddr = "10.0.0.1:12345"
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	if !strings.HasPrefix(xff, "203.0.113.50, 198.51.100.10") {
+		t.Errorf("expected XFF to preserve original values, got %q", xff)
+	}
+	if !strings.Contains(xff, "10.0.0.1") {
+		t.Errorf("expected XFF to contain client IP 10.0.0.1, got %q", xff)
+	}
+}
+
+func TestXFFHeaderFromNonTrustedClientStripsExisting(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	// Empty TrustedProxyCIDRs — only localhost is trusted
+	cfg := config.ProxyConfig{
+		UpstreamBaseURL: fUpstream.Server.URL,
+	}
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Simulate request from a non-trusted client (non-localhost) with spoofed XFF
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	req.RemoteAddr = "192.168.1.100:54321"
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	// Spoofed XFF should be stripped entirely — no X-Forwarded-For header at all
+	if xff != "" {
+		t.Errorf("expected XFF to be stripped entirely from non-trusted client, got %q", xff)
+	}
+}
+
+func TestXFFHeaderFromTrustedProxyNoExisting(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	cfg := config.ProxyConfig{
+		UpstreamBaseURL: fUpstream.Server.URL,
+	}
+	cfg.TrustedProxyCIDRs = config.ParseCIDRList("172.16.0.0/12")
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Simulate request from a trusted proxy with no existing XFF
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "172.16.0.50:12345"
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	if xff != "172.16.0.50" {
+		t.Errorf("expected XFF to be the client IP 172.16.0.50, got %q", xff)
+	}
+}
+
+func TestXFFForwardModeFromTrustedProxy(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	cfg := config.ProxyConfig{
+		UpstreamBaseURL:       fUpstream.Server.URL,
+		TrustedProxyXFFMode:   "forward",
+	}
+	cfg.TrustedProxyCIDRs = config.ParseCIDRList("10.0.0.0/8")
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Simulate request from a trusted proxy with existing XFF chain
+	// In forward mode, the existing X-Forwarded-For should be passed through as-is
+	// without appending the direct client IP.
+	// Note: RemoteAddr still comes from httptest, but httptest always uses 127.0.0.1:port.
+	// However isTrustedProxy checks localhost first, so localhost will be trusted.
+	// To test the trusted proxy CIDR path specifically, set RemoteAddr to a CIDR IP
+	// and note that httptest server wrapping still makes RemoteAddr point to the test client.
+	// We test via direct ServeHTTP call with explicit RemoteAddr.
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50, 198.51.100.10")
+	req.RemoteAddr = "10.0.0.1:12345"
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	// In forward mode, the existing XFF should be preserved exactly, not appended with 10.0.0.1
+	if xff != "203.0.113.50, 198.51.100.10" {
+		t.Errorf("forward mode: expected XFF to be passed through as-is, got %q", xff)
+	}
+}
+
+func TestXFFForwardModeFromLocalhost(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	cfg := config.ProxyConfig{
+		UpstreamBaseURL:     fUpstream.Server.URL,
+		TrustedProxyXFFMode: "forward",
+	}
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	req, _ := http.NewRequest("POST", server.URL+"/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50, 10.0.0.1")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	// Forward mode from localhost: should preserve XFF as-is, not append localhost
+	if xff != "203.0.113.50, 10.0.0.1" {
+		t.Errorf("forward mode from localhost: expected XFF passed through, got %q", xff)
+	}
+}
+
+func TestXFFHeaderFromNonTrustedClientIsStripped(t *testing.T) {
+	fUpstream := testutil.NewFakeUpstream(testutil.UpstreamHandlerOpts{
+		ResponseType: "json",
+		StatusCode:   200,
+		ResponseBody: map[string]interface{}{"id": "test"},
+	})
+	defer fUpstream.Server.Close()
+
+	mockEnqueuer := &mockLogEnqueuer{}
+	cfg := config.ProxyConfig{
+		UpstreamBaseURL: fUpstream.Server.URL,
+	}
+	handler := proxy.NewHandler(cfg, mockEnqueuer)
+
+	// Simulate request from a non-trusted client with spoofed XFF
+	req, _ := http.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	req.RemoteAddr = "192.168.1.100:54321"
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if len(fUpstream.Requests) != 1 {
+		t.Fatalf("expected 1 upstream request, got %d", len(fUpstream.Requests))
+	}
+	xff := fUpstream.Requests[0].Header.Get("X-Forwarded-For")
+	// Non-trusted: XFF should be stripped entirely (no header at all)
+	if xff != "" {
+		t.Errorf("expected XFF to be stripped from non-trusted client, got %q", xff)
+	}
+}
