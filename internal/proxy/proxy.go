@@ -30,10 +30,16 @@ type Handler struct {
 
 func NewHandler(cfg config.ProxyConfig, logEnqueuer LogEnqueuer) http.Handler {
 	transport := &http.Transport{
-		MaxIdleConns:        cfg.UpstreamMaxIdleConns,
-		IdleConnTimeout:     cfg.UpstreamIdleConnTimeout,
-		DisableCompression:  false,
+		MaxIdleConns:          cfg.UpstreamMaxIdleConns,
+		IdleConnTimeout:       cfg.UpstreamIdleConnTimeout,
+		ResponseHeaderTimeout: cfg.UpstreamResponseHeaderTimeout,
+		TLSHandshakeTimeout:   cfg.UpstreamTLSHandshakeTimeout,
+		DisableCompression:    false,
 	}
+	transport.DialContext = (&net.Dialer{
+		Timeout:   cfg.UpstreamDialTimeout,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
 	if cfg.UpstreamTLSInsecure || cfg.UpstreamTLSSNI != "" {
 		tlsConfig := &tls.Config{}
 		if cfg.UpstreamTLSInsecure {

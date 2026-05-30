@@ -18,12 +18,15 @@ type ProxyConfig struct {
 	LogClientWorkers        int
 	LogClientMaxRetries     int
 	CaptureMaxBytes         int
-	UpstreamTimeout         time.Duration
-	UpstreamMaxIdleConns    int
-	UpstreamIdleConnTimeout time.Duration
-	ReadHeaderTimeout       time.Duration
-	IdleTimeout             time.Duration
-	ProfileEnabled          bool
+	UpstreamTimeout              time.Duration
+	UpstreamMaxIdleConns         int
+	UpstreamIdleConnTimeout      time.Duration
+	UpstreamResponseHeaderTimeout time.Duration
+	UpstreamTLSHandshakeTimeout  time.Duration
+	UpstreamDialTimeout          time.Duration
+	ReadHeaderTimeout            time.Duration
+	IdleTimeout                  time.Duration
+	ProfileEnabled               bool
 	ProfileListenAddr       string
 	UpstreamTLSInsecure     bool
 	UpstreamTLSSNI          string
@@ -64,6 +67,9 @@ type LogServerConfig struct {
 //   - UPSTREAM_TIMEOUT: timeout for upstream requests (default 120s)
 //   - UPSTREAM_MAX_IDLE_CONNS: max idle connections to upstream (default 100)
 //   - UPSTREAM_IDLE_CONN_TIMEOUT: idle connection timeout (default 90s)
+//   - UPSTREAM_RESPONSE_HEADER_TIMEOUT: timeout for upstream response headers (default 60s)
+//   - UPSTREAM_TLS_HANDSHAKE_TIMEOUT: TLS handshake timeout for upstream (default 10s)
+//   - UPSTREAM_DIAL_TIMEOUT: TCP dial timeout for upstream connections (default 30s)
 //   - READ_HEADER_TIMEOUT: read header timeout (default 10s)
 //   - IDLE_TIMEOUT: idle timeout (default 120s)
 //   - PROFILE_ENABLED: enable pprof server (default false)
@@ -87,6 +93,9 @@ func LoadProxyConfig() ProxyConfig {
 		UpstreamTimeout:         getEnvDurationOrDefault("UPSTREAM_TIMEOUT", 120*time.Second),
 		UpstreamMaxIdleConns:    getEnvIntOrDefault("UPSTREAM_MAX_IDLE_CONNS", 100),
 		UpstreamIdleConnTimeout: getEnvDurationOrDefault("UPSTREAM_IDLE_CONN_TIMEOUT", 90*time.Second),
+		UpstreamResponseHeaderTimeout: getEnvDurationOrDefault("UPSTREAM_RESPONSE_HEADER_TIMEOUT", 60*time.Second),
+		UpstreamTLSHandshakeTimeout:  getEnvDurationOrDefault("UPSTREAM_TLS_HANDSHAKE_TIMEOUT", 10*time.Second),
+		UpstreamDialTimeout:          getEnvDurationOrDefault("UPSTREAM_DIAL_TIMEOUT", 30*time.Second),
 		ReadHeaderTimeout:       getEnvDurationOrDefault("READ_HEADER_TIMEOUT", 10*time.Second),
 		IdleTimeout:             getEnvDurationOrDefault("IDLE_TIMEOUT", 120*time.Second),
 		ProfileEnabled:          getEnvBoolOrDefault("PROFILE_ENABLED", false),
@@ -97,7 +106,7 @@ func LoadProxyConfig() ProxyConfig {
 		ProxyTLSKeyFile:         os.Getenv("PROXY_TLS_KEY_FILE"),
 		TrustedProxyCIDRs:       ParseCIDRList(os.Getenv("TRUSTED_PROXY_CIDRS")),
 		TrustedProxyXFFMode:     parseXFFMode(os.Getenv("TRUSTED_PROXY_XFF_MODE")),
-}
+	}
 }
 
 func ParseCIDRList(s string) []*net.IPNet {
