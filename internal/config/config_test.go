@@ -153,6 +153,9 @@ func unsetAllProxyEnv() {
 	os.Unsetenv("LOG_SERVER_TOKEN")
 	os.Unsetenv("LOG_QUEUE_SIZE")
 	os.Unsetenv("CAPTURE_MAX_BYTES")
+
+	os.Unsetenv("TRUSTED_PROXY_CIDRS")
+os.Unsetenv("TRUSTED_PROXY_XFF_MODE")
 }
 
 func unsetAllLogServerEnv() {
@@ -164,4 +167,52 @@ func unsetAllLogServerEnv() {
 	os.Unsetenv("ARCHIVE_ZSTD_WINDOW_MB")
 	os.Unsetenv("ARCHIVE_ZSTD_CONCURRENCY")
 	os.Unsetenv("ARCHIVE_MAX_CONCURRENT")
+}
+
+
+func TestProxyConfigTrustedProxyCIDRs(t *testing.T) {
+	unsetAllProxyEnv()
+	defer unsetAllProxyEnv()
+
+	// Default: nil (no trusted proxies beyond localhost)
+	cfg := LoadProxyConfig()
+	if cfg.TrustedProxyCIDRs != nil {
+		t.Errorf("expected nil TrustedProxyCIDRs by default, got %v", cfg.TrustedProxyCIDRs)
+	}
+
+	// Single CIDR
+	os.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8")
+	cfg = LoadProxyConfig()
+	if len(cfg.TrustedProxyCIDRs) != 1 {
+		t.Fatalf("expected 1 CIDR, got %d", len(cfg.TrustedProxyCIDRs))
+	}
+	if cfg.TrustedProxyCIDRs[0].String() != "10.0.0.0/8" {
+		t.Errorf("expected 10.0.0.0/8, got %s", cfg.TrustedProxyCIDRs[0].String())
+	}
+
+	// Multiple CIDRs (comma-separated)
+	os.Setenv("TRUSTED_PROXY_CIDRS", "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+	cfg = LoadProxyConfig()
+	if len(cfg.TrustedProxyCIDRs) != 3 {
+		t.Fatalf("expected 3 CIDRs, got %d", len(cfg.TrustedProxyCIDRs))
+	}
+	if cfg.TrustedProxyCIDRs[0].String() != "10.0.0.0/8" {
+		t.Errorf("expected 10.0.0.0/8, got %s", cfg.TrustedProxyCIDRs[0].String())
+	}
+	if cfg.TrustedProxyCIDRs[1].String() != "172.16.0.0/12" {
+		t.Errorf("expected 172.16.0.0/12, got %s", cfg.TrustedProxyCIDRs[1].String())
+	}
+	if cfg.TrustedProxyCIDRs[2].String() != "192.168.0.0/16" {
+		t.Errorf("expected 192.168.0.0/16, got %s", cfg.TrustedProxyCIDRs[2].String())
+	}
+}
+
+func TestProxyConfigXFFModeDefault(t *testing.T) {
+	unsetAllProxyEnv()
+	defer unsetAllProxyEnv()
+
+	cfg := LoadProxyConfig()
+	if cfg.TrustedProxyXFFMode != "append" {
+		t.Errorf("expected default TrustedProxyXFFMode 'append', got %q", cfg.TrustedProxyXFFMode)
+	}
 }

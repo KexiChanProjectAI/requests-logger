@@ -1,8 +1,10 @@
 package config
 
 import (
+	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -25,26 +27,28 @@ type ProxyConfig struct {
 	ProfileListenAddr       string
 	UpstreamTLSInsecure     bool
 	UpstreamTLSSNI          string
-	ProxyTLSCertFile        string // TLS cert file path for proxy HTTPS listener (empty = HTTP)
-	ProxyTLSKeyFile         string // TLS key file path for proxy HTTPS listener
+	ProxyTLSCertFile        string       // TLS cert file path for proxy HTTPS listener (empty = HTTP)
+	ProxyTLSKeyFile         string       // TLS key file path for proxy HTTPS listener
+	TrustedProxyCIDRs       []*net.IPNet // parsed CIDR list from TRUSTED_PROXY_CIDRS
+	TrustedProxyXFFMode     string       // XFF handling mode for trusted proxies: "append" (default) or "forward"
 }
 
 // LogServerConfig holds configuration for the log server.
 type LogServerConfig struct {
-	ListenAddr               string
-	LogServerToken           string
-	LogDir                   string
-	UTCHourlyLayout          string
-	ArchiveEnabled           bool
-	ArchiveZstdWindowMB      int
-	ArchiveZstdConcurrency   int
-	ArchiveMaxConcurrent     int
-	StaleHandleTimeout       time.Duration
-	CleanupInterval          time.Duration
-	ReadHeaderTimeout        time.Duration
-	IdleTimeout              time.Duration
-	ProfileEnabled           bool
-	ProfileListenAddr        string
+	ListenAddr             string
+	LogServerToken         string
+	LogDir                 string
+	UTCHourlyLayout        string
+	ArchiveEnabled         bool
+	ArchiveZstdWindowMB    int
+	ArchiveZstdConcurrency int
+	ArchiveMaxConcurrent   int
+	StaleHandleTimeout     time.Duration
+	CleanupInterval        time.Duration
+	ReadHeaderTimeout      time.Duration
+	IdleTimeout            time.Duration
+	ProfileEnabled         bool
+	ProfileListenAddr      string
 }
 
 // LoadProxyConfig loads proxy configuration from environment variables.
@@ -66,6 +70,10 @@ type LogServerConfig struct {
 //   - PROFILE_LISTEN_ADDR: pprof server listen address (default ":6060")
 //   - UPSTREAM_TLS_INSECURE: skip upstream TLS certificate verification (default false)
 //   - UPSTREAM_TLS_SNI: override TLS ServerName (SNI) for upstream HTTPS (default "")
+//   - PROXY_TLS_CERT_FILE: TLS cert file path for proxy HTTPS listener (default "")
+//   - PROXY_TLS_KEY_FILE: TLS key file path for proxy HTTPS listener (default "")
+//   - TRUSTED_PROXY_CIDRS: comma-separated CIDRs of trusted reverse proxies whose XFF headers are preserved (default "")
+//   - TRUSTED_PROXY_XFF_MODE: XFF handling mode for trusted proxies: "append" (append client IP to chain, default) or "forward" (passthrough as-is, default "append")
 func LoadProxyConfig() ProxyConfig {
 	return ProxyConfig{
 		ListenAddr:              os.Getenv("LISTEN_ADDR"),
@@ -87,7 +95,39 @@ func LoadProxyConfig() ProxyConfig {
 		UpstreamTLSSNI:          os.Getenv("UPSTREAM_TLS_SNI"),
 		ProxyTLSCertFile:        os.Getenv("PROXY_TLS_CERT_FILE"),
 		ProxyTLSKeyFile:         os.Getenv("PROXY_TLS_KEY_FILE"),
+		TrustedProxyCIDRs:       ParseCIDRList(os.Getenv("TRUSTED_PROXY_CIDRS")),
+		TrustedProxyXFFMode:     parseXFFMode(os.Getenv("TRUSTED_PROXY_XFF_MODE")),
+}
+}
+
+func ParseCIDRList(s string) []*net.IPNet {
+	if s == "" {
+		return nil
 	}
+	parts := strings.Split(s, ",")
+	var cidrs []*net.IPNet
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(p)
+		if err != nil {
+			continue
+		}
+		cidrs = append(cidrs, cidr)
+	}
+	return cidrs
+}
+func parseXFFMode(s string) string {
+	if s == "" {
+		return "append"
+	}
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "forward" || s == "passthrough" {
+		return "forward"
+	}
+	return "append"
 }
 
 // LoadLogServerConfig loads log server configuration from environment variables.
@@ -108,20 +148,20 @@ func LoadProxyConfig() ProxyConfig {
 //   - PROFILE_LISTEN_ADDR: pprof server listen address (default ":6060")
 func LoadLogServerConfig() LogServerConfig {
 	return LogServerConfig{
-		ListenAddr:               os.Getenv("LISTEN_ADDR"),
-		LogServerToken:           os.Getenv("LOG_SERVER_TOKEN"),
-		LogDir:                   os.Getenv("LOG_DIR"),
-		UTCHourlyLayout:          getEnvOrDefault("UTC_HOURLY_LAYOUT", "2006/01/02/15"),
-		ArchiveEnabled:           getEnvBoolOrDefault("ARCHIVE_ENABLED", true),
-		ArchiveZstdWindowMB:      getEnvIntOrDefault("ARCHIVE_ZSTD_WINDOW_MB", 512),
-		ArchiveZstdConcurrency:   getEnvIntOrDefault("ARCHIVE_ZSTD_CONCURRENCY", 8),
-		ArchiveMaxConcurrent:     getEnvIntOrDefault("ARCHIVE_MAX_CONCURRENT", 1),
-		StaleHandleTimeout:       getEnvDurationOrDefault("STALE_HANDLE_TIMEOUT", 5*time.Minute),
-		CleanupInterval:          getEnvDurationOrDefault("CLEANUP_INTERVAL", 1*time.Minute),
-		ReadHeaderTimeout:        getEnvDurationOrDefault("READ_HEADER_TIMEOUT", 10*time.Second),
-		IdleTimeout:              getEnvDurationOrDefault("IDLE_TIMEOUT", 120*time.Second),
-		ProfileEnabled:           getEnvBoolOrDefault("PROFILE_ENABLED", false),
-		ProfileListenAddr:        getEnvOrDefault("PROFILE_LISTEN_ADDR", ":6060"),
+		ListenAddr:             os.Getenv("LISTEN_ADDR"),
+		LogServerToken:         os.Getenv("LOG_SERVER_TOKEN"),
+		LogDir:                 os.Getenv("LOG_DIR"),
+		UTCHourlyLayout:        getEnvOrDefault("UTC_HOURLY_LAYOUT", "2006/01/02/15"),
+		ArchiveEnabled:         getEnvBoolOrDefault("ARCHIVE_ENABLED", true),
+		ArchiveZstdWindowMB:    getEnvIntOrDefault("ARCHIVE_ZSTD_WINDOW_MB", 512),
+		ArchiveZstdConcurrency: getEnvIntOrDefault("ARCHIVE_ZSTD_CONCURRENCY", 8),
+		ArchiveMaxConcurrent:   getEnvIntOrDefault("ARCHIVE_MAX_CONCURRENT", 1),
+		StaleHandleTimeout:     getEnvDurationOrDefault("STALE_HANDLE_TIMEOUT", 5*time.Minute),
+		CleanupInterval:        getEnvDurationOrDefault("CLEANUP_INTERVAL", 1*time.Minute),
+		ReadHeaderTimeout:      getEnvDurationOrDefault("READ_HEADER_TIMEOUT", 10*time.Second),
+		IdleTimeout:            getEnvDurationOrDefault("IDLE_TIMEOUT", 120*time.Second),
+		ProfileEnabled:         getEnvBoolOrDefault("PROFILE_ENABLED", false),
+		ProfileListenAddr:      getEnvOrDefault("PROFILE_LISTEN_ADDR", ":6060"),
 	}
 }
 
