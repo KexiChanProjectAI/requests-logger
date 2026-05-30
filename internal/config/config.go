@@ -3,6 +3,7 @@ package config
 import (
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,8 @@ type ProxyConfig struct {
 	ProxyTLSKeyFile         string       // TLS key file path for proxy HTTPS listener
 	TrustedProxyCIDRs       []*net.IPNet // parsed CIDR list from TRUSTED_PROXY_CIDRS
 	TrustedProxyXFFMode     string       // XFF handling mode for trusted proxies: "append" (default) or "forward"
+	UAWhitelist             []*regexp.Regexp // compiled regex patterns for User-Agent whitelist (from UA_WHITELIST)
+	UABlacklist             []*regexp.Regexp // compiled regex patterns for User-Agent blacklist (from UA_BLACKLIST)
 }
 
 // LogServerConfig holds configuration for the log server.
@@ -106,6 +109,8 @@ func LoadProxyConfig() ProxyConfig {
 		ProxyTLSKeyFile:         os.Getenv("PROXY_TLS_KEY_FILE"),
 		TrustedProxyCIDRs:       ParseCIDRList(os.Getenv("TRUSTED_PROXY_CIDRS")),
 		TrustedProxyXFFMode:     parseXFFMode(os.Getenv("TRUSTED_PROXY_XFF_MODE")),
+		UAWhitelist:             ParseRegexList(os.Getenv("UA_WHITELIST")),
+		UABlacklist:             ParseRegexList(os.Getenv("UA_BLACKLIST")),
 	}
 }
 
@@ -137,6 +142,28 @@ func parseXFFMode(s string) string {
 		return "forward"
 	}
 	return "append"
+}
+
+// ParseRegexList parses a comma-separated list of regex patterns.
+// Empty or invalid patterns are silently skipped.
+func ParseRegexList(s string) []*regexp.Regexp {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var result []*regexp.Regexp
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		re, err := regexp.Compile(p)
+		if err != nil {
+			continue
+		}
+		result = append(result, re)
+	}
+	return result
 }
 
 // LoadLogServerConfig loads log server configuration from environment variables.

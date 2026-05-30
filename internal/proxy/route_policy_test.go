@@ -1,7 +1,9 @@
 package proxy
 
-import "testing"
-
+import (
+	"regexp"
+	"testing"
+)
 func TestShouldLogPath(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -193,4 +195,113 @@ func TestShouldLogPath(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestShouldBlockUA(t *testing.T) {
+	tests := []struct {
+		name      string
+		ua        string
+		whitelist []string // regex patterns to compile
+		blacklist []string // regex patterns to compile
+		want      bool
+	}{
+		{
+			name: "no_lists_allows_all",
+			ua:   "curl/7.0",
+			want: false,
+		},
+		{
+			name:      "whitelist_match_allows",
+			ua:        "python-requests/2.0",
+			whitelist: []string{"python-requests"},
+			want:      false,
+		},
+		{
+			name:      "whitelist_no_match_blocks",
+			ua:        "curl/7.0",
+			whitelist: []string{"python-requests"},
+			want:      true,
+		},
+		{
+			name:      "whitelist_regex_match",
+			ua:        "Mozilla/5.0 (compatible; Googlebot/2.1)",
+			whitelist: []string{"(?i)googlebot"},
+			want:      false,
+		},
+		{
+			name:      "whitelist_regex_no_match",
+			ua:        "Mozilla/5.0 (Windows NT 10.0)",
+			whitelist: []string{"(?i)googlebot"},
+			want:      true,
+		},
+		{
+			name:      "blacklist_match_blocks",
+			ua:        "curl/7.0",
+			blacklist: []string{"curl"},
+			want:      true,
+		},
+		{
+			name:      "blacklist_no_match_allows",
+			ua:        "python-requests/2.0",
+			blacklist: []string{"curl"},
+			want:      false,
+		},
+		{
+			name:      "blacklist_regex_match",
+			ua:        "Mozilla/5.0 (compatible; Bingbot/2.0)",
+			blacklist: []string{"(?i)bot"},
+			want:      true,
+		},
+		{
+			name:      "blacklist_regex_no_match",
+			ua:        "Mozilla/5.0 (compatible)",
+			blacklist: []string{"(?i)bot"},
+			want:      false,
+		},
+		{
+			name:      "whitelist_takes_precedence_over_blacklist",
+			ua:        "curl/7.0",
+			whitelist: []string{"python"},
+			blacklist: []string{"curl"},
+			want:      true, // whitelist active, curl doesn't match whitelist
+		},
+		{
+			name:      "whitelist_empty_ua_blocks",
+			ua:        "",
+			whitelist: []string{"python"},
+			want:      true,
+		},
+		{
+			name:      "blacklist_empty_ua_allows",
+			ua:        "",
+			blacklist: []string{"curl"},
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Compile pattern strings to regexps
+			whitelist := make([]*regexp.Regexp, len(tt.whitelist))
+			for i, p := range tt.whitelist {
+				re, err := regexp.Compile(p)
+				if err != nil {
+					t.Fatalf("invalid whitelist pattern %q: %v", p, err)
+				}
+				whitelist[i] = re
+			}
+			blacklist := make([]*regexp.Regexp, len(tt.blacklist))
+			for i, p := range tt.blacklist {
+				re, err := regexp.Compile(p)
+				if err != nil {
+					t.Fatalf("invalid blacklist pattern %q: %v", p, err)
+				}
+				blacklist[i] = re
+			}
+
+			if got := shouldBlockUA(tt.ua, whitelist, blacklist); got != tt.want {
+				t.Errorf("shouldBlockUA(%q) = %v, want %v", tt.ua, got, tt.want)
+			}
+		})
+	}
 }

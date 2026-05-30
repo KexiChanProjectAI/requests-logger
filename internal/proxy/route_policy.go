@@ -1,7 +1,9 @@
 package proxy
 
-import "strings"
-
+import (
+	"regexp"
+	"strings"
+)
 // denyExact are paths that are explicitly denied with exact matching.
 var denyExact = []string{
 	"/admin",
@@ -67,5 +69,32 @@ func shouldLogPath(path string) bool {
 	}
 
 	// Step 5: Default - do not log
+	return false
+}
+
+// shouldBlockUA returns true if the User-Agent should be blocked based on
+// the configured whitelist and blacklist regex patterns.
+// Whitelist takes precedence: if whitelist is non-empty, only UAs matching
+// at least one whitelist pattern are allowed (blacklist is ignored).
+// If only blacklist is set, any UA matching a blacklist pattern is blocked.
+// If neither is set, all UAs are allowed.
+func shouldBlockUA(ua string, whitelist, blacklist []*regexp.Regexp) bool {
+	if len(whitelist) > 0 {
+		// Whitelist mode: block unless UA matches at least one whitelist pattern
+		for _, re := range whitelist {
+			if re.MatchString(ua) {
+				return false
+			}
+		}
+		return true
+	}
+	if len(blacklist) > 0 {
+		// Blacklist mode: block if UA matches any blacklist pattern
+		for _, re := range blacklist {
+			if re.MatchString(ua) {
+				return true
+			}
+		}
+	}
 	return false
 }
