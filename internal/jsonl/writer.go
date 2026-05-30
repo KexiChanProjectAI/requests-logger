@@ -112,14 +112,15 @@ func (w *Writer) closeStaleHandles() {
 		delete(w.handles, s.hour)
 	}
 	w.handlesMu.Unlock()
-
 	// Close files and trigger archives OUTSIDE the lock
+	activeFile := filepath.Join(w.config.LogDir, now.UTC().Format(w.config.UTCHourlyLayout)+".jsonl")
 	var archivePaths []string
 	for _, s := range stale {
 		s.fh.mu.Lock()
 		s.fh.file.Close()
 		s.fh.mu.Unlock()
-		if w.config.ArchiveEnabled {
+		// Only archive files from completed periods — never the current active file
+		if w.config.ArchiveEnabled && s.filePath != activeFile {
 			archivePaths = append(archivePaths, s.filePath)
 		}
 	}
